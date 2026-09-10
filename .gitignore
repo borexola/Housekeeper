@@ -1,0 +1,42 @@
+## .NET
+bin/
+obj/
+out/
+artifacts/
+*.user
+*.suo
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.DotSettings.user
+
+## Build / test results
+TestResults/
+*.trx
+coverage*.json
+coverage*.xml
+coverage*.info
+[Bb]enchmarkdotnet*/
+
+## Local data / secrets
+*.db
+*.db-shm
+*.db-wal
+/data/
+# Where a Visual Studio / dotnet run keeps its database, settings and secrets.
+/.localdata/
+# Belt and braces: a stored secret must never be committable, wherever it ends up.
+secrets.json
+appsettings.*.local.json
+*.pfx
+secrets.env
+.env
+
+## NuGet
+*.nupkg
+packages/
+
+## OS
+Thumbs.db
+.DS_Store

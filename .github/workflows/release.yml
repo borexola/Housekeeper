@@ -1,0 +1,77 @@
+name: Release
+
+# Builds the images the Home Assistant add-on installs from, one per architecture, because the Supervisor
+# substitutes {arch} into a plain image name rather than reading a multi-arch manifest.
+#
+# Tag a version to publish:  git tag v0.1.0 && git push origin v0.1.0
+# The tag must match the version in hearthsense/config.yaml.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to publish, without the leading v
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - addon_arch: amd64
+            platform: linux/amd64
+          - addon_arch: aarch64
+            platform: linux/arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out the version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="${GITHUB_REF_NAME#v}"
+          fi
+          echo "value=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag matches the add-on manifest
+        run: |
+          declared=$(grep -E '^version:' hearthsense/config.yaml | sed -E 's/version:[[:space:]]*"?([^"]*)"?/\1/')
+          if [ "${declared}" != "${{ steps.version.outputs.value }}" ]; then
+            echo "hearthsense/config.yaml says ${declared} but this release is ${{ steps.version.outputs.value }}." >&2
+            exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: hearthsense/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/hearthsense-${{ matrix.addon_arch }}:${{ steps.version.outputs.value }}
+            ghcr.io/${{ github.repository_owner }}/hearthsense-${{ matrix.addon_arch }}:latest
+          cache-from: type=gha,scope=${{ matrix.addon_arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.addon_arch }}
