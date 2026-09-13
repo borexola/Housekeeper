@@ -1,16 +1,28 @@
+# Patterns are matched against the whole context-relative path, so a bare "bin" excludes only ./bin.
+# Without the globs a developer's src/HearthSense.Api/obj was copied over the obj/ the container had just
+# restored into, replacing project.assets.json, and the --no-restore publish failed on a clean checkout.
 .git
 .github
 .vs
 .vscode
 .idea
-bin
-obj
-TestResults
+**/bin
+**/obj
+**/TestResults
 coverage*
 *.db
 *.db-wal
 *.db-shm
 data
+# Both Dockerfiles copy named paths rather than the whole context, so these cannot reach an image today.
+# They are excluded anyway: the context is still handed to the daemon, and a later COPY . would otherwise
+# bake a developer's real Home Assistant token into a published image.
+.localdata
+secrets.json
+*.pfx
+secrets.env
+.env
+AGENTS.md
 deploy/config
 tests
 docs

@@ -32,6 +32,9 @@ appsettings.*.local.json
 *.pfx
 secrets.env
 .env
+# Local agent/session notes. They accumulate the specifics of one machine -- share paths, host addresses,
+# the token a test deployment is running with -- none of which belong in a public repository.
+AGENTS.md
 
 ## NuGet
 *.nupkg
