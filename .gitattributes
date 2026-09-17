@@ -1,11 +1,11 @@
 # Everything stays LF, in the repository and in the working tree.
 #
 # Two things depend on it: the formatting gate enforces `end_of_line = lf`, so a CRLF checkout fails CI on
-# a fresh clone, and hearthsense/run.sh must be LF or the add-on container cannot execute it.
+# a fresh clone, and housekeeper/run.sh must be LF or the add-on container cannot execute it.
 * text=auto eol=lf
 
 *.sh text eol=lf
-hearthsense/run.sh text eol=lf
+housekeeper/run.sh text eol=lf
 
 *.png binary
 *.jpg binary

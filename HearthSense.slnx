@@ -1,9 +1,0 @@
-<Solution>
-  <Folder Name="/src/">
-    <Project Path="src/HearthSense.Core/HearthSense.Core.csproj" />
-    <Project Path="src/HearthSense.Api/HearthSense.Api.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/HearthSense.Tests/HearthSense.Tests.csproj" />
-  </Folder>
-</Solution>

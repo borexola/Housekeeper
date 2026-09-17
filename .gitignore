@@ -43,3 +43,9 @@ packages/
 ## OS
 Thumbs.db
 .DS_Store
+
+# local preview scratch
+.preview/
+.claude/
+/settings.json
+*.db-journal

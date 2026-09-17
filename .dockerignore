@@ -1,5 +1,5 @@
 # Patterns are matched against the whole context-relative path, so a bare "bin" excludes only ./bin.
-# Without the globs a developer's src/HearthSense.Api/obj was copied over the obj/ the container had just
+# Without the globs a developer's src/Housekeeper.Api/obj was copied over the obj/ the container had just
 # restored into, replacing project.assets.json, and the --no-restore publish failed on a clean checkout.
 .git
 .github

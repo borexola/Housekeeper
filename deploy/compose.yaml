@@ -1,41 +1,41 @@
-# HearthSense — Docker Compose stack
+# Housekeeper — Docker Compose stack
 #
-#   export HEARTHSENSE_HA_TOKEN=<long-lived token from an ADMIN Home Assistant user>
+#   export HOUSEKEEPER_HA_TOKEN=<long-lived token from an ADMIN Home Assistant user>
 #   export HA_URL=http://homeassistant.local:8123
 #   docker compose -f deploy/compose.yaml --profile llm up --build
 #
-# Then open http://127.0.0.1:5080/dashboard and paste HEARTHSENSE_API_TOKEN into the token box.
+# Then open http://127.0.0.1:5080/dashboard and paste HOUSEKEEPER_API_TOKEN into the token box.
 # Everything else is configurable at http://127.0.0.1:5080/settings.
 #
-# Optional file config: cp examples/appsettings.sample.json deploy/config/hearthsense.json
+# Optional file config: cp examples/appsettings.sample.json deploy/config/housekeeper.json
 # Environment variables win over that file, and the settings page wins over both. Anything saved
-# there lives in the hearthsense-data volume, so keep the volume to keep your configuration.
+# there lives in the housekeeper-data volume, so keep the volume to keep your configuration.
 
-name: hearthsense
+name: housekeeper
 
 services:
-  hearthsense:
+  housekeeper:
     build:
       context: ..
       dockerfile: deploy/docker/Dockerfile
-    image: hearthsense:latest
+    image: housekeeper:latest
     restart: unless-stopped
     environment:
-      HEARTHSENSE_HA_TOKEN: ${HEARTHSENSE_HA_TOKEN:?Set HEARTHSENSE_HA_TOKEN (admin long-lived access token)}
+      HOUSEKEEPER_HA_TOKEN: ${HOUSEKEEPER_HA_TOKEN:?Set HOUSEKEEPER_HA_TOKEN (admin long-lived access token)}
       # The container binds 0.0.0.0, so a token is required. Generate one with: openssl rand -hex 32
-      HEARTHSENSE_API_TOKEN: ${HEARTHSENSE_API_TOKEN:?Set HEARTHSENSE_API_TOKEN for API auth}
-      HEARTHSENSE_CONFIG_FILE: /app/config/hearthsense.json
-      HEARTHSENSE__HomeAssistant__BaseUrl: ${HA_URL:-http://homeassistant.local:8123}
-      HEARTHSENSE__Llm__Endpoint: ${LLM_URL:-http://ollama:11434}
-      HEARTHSENSE__Llm__Model: ${LLM_MODEL:-qwen2.5:7b}
+      HOUSEKEEPER_API_TOKEN: ${HOUSEKEEPER_API_TOKEN:?Set HOUSEKEEPER_API_TOKEN for API auth}
+      HOUSEKEEPER_CONFIG_FILE: /app/config/housekeeper.json
+      HOUSEKEEPER__HomeAssistant__BaseUrl: ${HA_URL:-http://homeassistant.local:8123}
+      HOUSEKEEPER__Llm__Endpoint: ${LLM_URL:-http://ollama:11434}
+      HOUSEKEEPER__Llm__Model: ${LLM_MODEL:-qwen2.5:7b}
       # Nothing is observed until you opt entities in.
-      HEARTHSENSE__Scan__Include__0: ${SCAN_INCLUDE:-binary_sensor.*}
+      HOUSEKEEPER__Scan__Include__0: ${SCAN_INCLUDE:-binary_sensor.*}
     ports:
       # Published to host loopback only; the bearer token is the second layer, not the only one.
       - "127.0.0.1:5080:5080"
     volumes:
       - ./config:/app/config:ro
-      - hearthsense-data:/data
+      - housekeeper-data:/data
 
   # Optional local model backend: --profile llm
   ollama:
@@ -48,5 +48,5 @@ services:
       - "127.0.0.1:11434:11434"
 
 volumes:
-  hearthsense-data:
+  housekeeper-data:
   ollama-data:

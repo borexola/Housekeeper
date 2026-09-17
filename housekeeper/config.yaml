@@ -1,0 +1,35 @@
+# Home Assistant add-on manifest.
+#
+# The image is built and pushed by .github/workflows/release.yml when a version tag is pushed. The tag has
+# to match the version below, and the Supervisor substitutes {arch} for the machine it is installing on.
+name: Housekeeper
+version: "0.1.0"
+slug: housekeeper
+description: Describe an automation in plain English, review the YAML, then it goes live.
+url: https://github.com/borexola/Housekeeper
+image: ghcr.io/borexola/housekeeper-{arch}
+
+arch:
+  - amd64
+  - aarch64
+
+init: false
+startup: application
+boot: auto
+
+# Reached only through the sidebar. The port is not published, so nothing on your network can touch it.
+ingress: true
+ingress_port: 5080
+panel_icon: mdi:home-lightning-bolt
+panel_title: Housekeeper
+
+# Lets the add-on use the Supervisor's own credentials instead of asking you for a token.
+homeassistant_api: true
+
+options:
+  home_assistant_token: ""
+  log_level: info
+
+schema:
+  home_assistant_token: password?
+  log_level: list(trace|debug|info|warning|error)

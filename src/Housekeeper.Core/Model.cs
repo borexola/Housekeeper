@@ -1,0 +1,277 @@
+using System.Globalization;
+
+namespace Housekeeper.Core;
+
+/// <summary>
+/// A Home Assistant entity as returned by <c>GET /api/states</c>. An automation entity also carries the id
+/// of its stored config, which is what its definition is read and written under.
+/// </summary>
+public sealed record HaEntity(
+    string EntityId,
+    string State,
+    DateTimeOffset LastChanged,
+    DateTimeOffset LastUpdated,
+    string? FriendlyName = null,
+    string? DeviceClass = null,
+    string? Unit = null,
+    string? Area = null,
+    string? AutomationConfigId = null,
+    string? DeviceId = null,
+    string? DeviceName = null,
+
+    /// <summary>
+    /// Home Assistant's <c>state_class</c>: <c>measurement</c>, <c>total</c> or <c>total_increasing</c>.
+    /// The last two mark a running total, which no distribution-based detector can say anything about.
+    /// </summary>
+    string? StateClass = null,
+
+    /// <summary>
+    /// Home Assistant's own <c>entity_category</c>: <c>config</c>, <c>diagnostic</c>, or null for an
+    /// ordinary entity. Read from the entity registry, so null also means the registry was not available.
+    /// </summary>
+    string? EntityCategory = null,
+
+    /// <summary>Hidden by the user in Home Assistant, which is them saying they do not want to see it.</summary>
+    bool Hidden = false)
+{
+    /// <summary>The part before the first dot, e.g. <c>light</c> for <c>light.kitchen</c>.</summary>
+    public string Domain => Ha.DomainOf(EntityId);
+
+    /// <summary>
+    /// Home Assistant classes this as a setting or an instrument reading rather than something the house
+    /// does. This is the authoritative version of what <c>Baselines</c> otherwise has to guess from names.
+    /// </summary>
+    public bool IsConfigOrDiagnostic =>
+        EntityCategory is not null &&
+        (EntityCategory.Equals("config", StringComparison.OrdinalIgnoreCase) ||
+         EntityCategory.Equals("diagnostic", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// A running total rather than a reading: an energy meter, a data counter, a rainfall accumulator.
+    /// Its newest value is the largest it has ever been by definition, so "unusually high" is meaningless.
+    /// </summary>
+    public bool IsCumulative =>
+        StateClass is not null &&
+        (StateClass.Equals("total_increasing", StringComparison.OrdinalIgnoreCase) ||
+         StateClass.Equals("total", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The state parsed as a number, or null when it is not numeric.</summary>
+    public double? Numeric => Ha.TryNumeric(State, out var v) ? v : null;
+
+    /// <summary>True when Home Assistant reports the entity as missing or not yet known.</summary>
+    public bool IsUnavailable => Ha.IsUnavailable(State);
+}
+
+/// <summary>An automation that already exists in Home Assistant, reduced to what duplicate detection needs.</summary>
+public sealed record ExistingAutomation(
+    string Id,
+    string EntityId,
+    string Alias,
+    IReadOnlySet<string> Entities,
+    IReadOnlySet<string> TriggerKinds);
+
+/// <summary>A validated automation the model drafted, ready to show the user.</summary>
+public sealed record AutomationDraft(
+    string Alias,
+    string? Description,
+    string ConfigJson,
+    IReadOnlyList<string> Entities,
+    IReadOnlyList<string> Actions,
+    IReadOnlySet<string> TriggerKinds);
+
+/// <summary>An existing automation that looks like it already does what a draft proposes.</summary>
+public sealed record DuplicateMatch(string AutomationId, string Alias, double Score, string Reason);
+
+public enum ProposalSource { User = 0, Anomaly = 1 }
+
+public enum ProposalStatus
+{
+    /// <summary>Drafted and waiting for the user to confirm or reject.</summary>
+    Draft = 0,
+    /// <summary>Confirmed and written to Home Assistant.</summary>
+    Created = 1,
+    Rejected = 2,
+    /// <summary>The model produced nothing usable, or Home Assistant refused the write.</summary>
+    Failed = 3,
+    /// <summary>Replaced by a refined draft; see the newer proposal whose <see cref="Proposal.ParentId"/> points here.</summary>
+    Superseded = 4,
+    /// <summary>Created here, then deleted in Home Assistant's own editor. Noticed by the scanner.</summary>
+    Removed = 5,
+}
+
+/// <summary>A drafted automation and everything the user needs to decide on it.</summary>
+public sealed record Proposal
+{
+    public long Id { get; init; }
+    public required string Request { get; init; }
+    public ProposalSource Source { get; init; }
+    public ProposalStatus Status { get; init; }
+    /// <summary>What the user asked to change about the parent draft, when this is a refinement.</summary>
+    public string? Feedback { get; init; }
+    /// <summary>The draft this one refines, if any.</summary>
+    public long? ParentId { get; init; }
+    public string? Alias { get; init; }
+    public string? Description { get; init; }
+    public string? ConfigJson { get; init; }
+    public IReadOnlyList<string> Entities { get; init; } = [];
+    public IReadOnlyList<string> Actions { get; init; } = [];
+    public IReadOnlyList<DuplicateMatch> Duplicates { get; init; } = [];
+    public string? HaAutomationId { get; init; }
+    public string? Error { get; init; }
+    public long? AnomalyId { get; init; }
+    public DateTimeOffset CreatedUtc { get; init; }
+    public DateTimeOffset? DecidedUtc { get; init; }
+
+    /// <summary>
+    /// When the user put this out of sight. Only hides it from the dashboard: a dismissed automation is
+    /// still live in Home Assistant and is still watched for entities that disappear under it.
+    /// </summary>
+    public DateTimeOffset? DismissedUtc { get; init; }
+}
+
+public enum AnomalyKind
+{
+    /// <summary>Held a state far longer than it historically does — the "freezer door left open" case.</summary>
+    StuckState = 0,
+    /// <summary>A numeric reading far outside its own recent distribution.</summary>
+    NumericOutlier = 1,
+    /// <summary>Reporting unavailable/unknown after a history of being available.</summary>
+    Unavailable = 2,
+    /// <summary>An automation Housekeeper created references an entity that no longer exists.</summary>
+    MissingEntity = 3,
+    /// <summary>A rule the user set through a concern fired: a reading past a line, a state held too long.</summary>
+    Concern = 4,
+}
+
+public enum AnomalyStatus
+{
+    Open = 0,
+    Dismissed = 1,
+    /// <summary>The user turned it into an automation proposal.</summary>
+    Promoted = 2,
+    /// <summary>The condition it described is no longer there, so the scanner closed it.</summary>
+    Resolved = 3,
+}
+
+/// <summary>Something the scanner noticed. Never notifies on its own — the user decides what it becomes.</summary>
+public sealed record Anomaly
+{
+    public long Id { get; init; }
+    /// <summary>Stable identity for one ongoing condition, so repeated scans update rather than duplicate.</summary>
+    public required string DedupKey { get; init; }
+    public required string EntityId { get; init; }
+    public AnomalyKind Kind { get; init; }
+    public required string Summary { get; init; }
+    /// <summary>The numbers behind <see cref="Summary"/>, as a JSON object.</summary>
+    public string EvidenceJson { get; init; } = "{}";
+    /// <summary>Plain-English request handed to the drafter when the user promotes this.</summary>
+    public required string SuggestedRequest { get; init; }
+    public AnomalyStatus Status { get; init; }
+    public DateTimeOffset DetectedUtc { get; init; }
+    public DateTimeOffset? DecidedUtc { get; init; }
+    public long? ProposalId { get; init; }
+
+    /// <summary>
+    /// How far past its own bar this finding is, as a multiple: 1.0 is exactly at the threshold that raised
+    /// it, 4.0 is four times over. Comparable across the three detectors on purpose, because the list is one
+    /// list — an undifferentiated column of nineteen cards buries the freezer door among the smart plugs.
+    /// </summary>
+    public double Severity { get; init; } = 1;
+}
+
+/// <summary>
+/// The two shapes of history the detectors need, which are not the same shape.
+///
+/// <see cref="Recent"/> has to be contiguous: the stuck-state detector measures how long the entity spent in
+/// each state by subtracting one stored sample from the next, so a gap in it does not read as a gap, it reads
+/// as one very long stretch, and the inflated worst case is the bar every finding is then measured against.
+///
+/// <see cref="Numeric"/> is the opposite. It wants coverage of the whole retention window rather than
+/// adjacency, because a distribution taken from the most recent few hundred changes of a chatty sensor is a
+/// distribution of the last few hours. That is how an outdoor thermometer came to be judged against an
+/// afternoon it had never left: at 8.6 °C against a median of 23.25 °C it scored over five sigma, and the
+/// only thing it had actually done was get dark.
+/// </summary>
+public sealed record EntityHistory(
+    IReadOnlyList<StateSample> Recent,
+    IReadOnlyList<StateSample> Numeric)
+{
+    /// <summary>Both views from one list, for callers that have no reason to distinguish them.</summary>
+    public static EntityHistory Of(IReadOnlyList<StateSample> samples) => new(samples, samples);
+
+    public static readonly EntityHistory Empty = new([], []);
+}
+
+/// <summary>
+/// What the stored history amounts to right now. Exists so someone can be told why nothing has been found
+/// yet — usually that most entities have not changed often enough for a detector to have an opinion.
+/// </summary>
+/// <param name="Entities">Entities with any history inside the retention window.</param>
+/// <param name="Samples">Recorded state changes across all of them.</param>
+/// <param name="OldestUtc">When the oldest kept sample was recorded, or null when there is none.</param>
+public sealed record HistorySummary(int Entities, long Samples, DateTimeOffset? OldestUtc);
+
+/// <summary>One observed state for an entity. Recorded only when the state actually changes.</summary>
+public sealed record StateSample(string State, double? Numeric, DateTimeOffset ChangedUtc);
+
+/// <summary>Small helpers shared by the model and the detectors.</summary>
+public static class Ha
+{
+    private static readonly string[] UnavailableStates = ["unavailable", "unknown", "none", ""];
+
+    public static string DomainOf(string entityId)
+    {
+        var dot = entityId.IndexOf('.');
+        return dot > 0 ? entityId[..dot] : entityId;
+    }
+
+    public static bool TryNumeric(string? state, out double value) =>
+        double.TryParse(state, NumberStyles.Float, CultureInfo.InvariantCulture, out value) && double.IsFinite(value);
+
+    public static bool IsUnavailable(string? state) =>
+        state is null || UnavailableStates.Contains(state.Trim(), StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Services that act on Home Assistant itself rather than on something in the house.
+    ///
+    /// Every other check in Housekeeper asks "can this be verified?", and for these the answer is yes —
+    /// Home Assistant really does offer <c>homeassistant.stop</c>. Verifiable is being used as a proxy for
+    /// safe, and here it is not one: an automation that restarts or stops Home Assistant, or moves where it
+    /// thinks it is, is not something a language model should be able to reach for while drafting "turn the
+    /// hall light off". They are kept off the menu the model is shown, and refused if it names one anyway.
+    /// </summary>
+    public static bool ActsOnTheInstallation(string service)
+    {
+        var domain = DomainOf(service);
+
+        // The Supervisor's own domain: updating, restarting and rebuilding add-ons and the host.
+        if (domain is "hassio" or "update") return true;
+        if (domain is not "homeassistant") return false;
+
+        var name = service[(domain.Length + 1)..];
+
+        return name is "stop" or "restart" or "set_location" or "check_config" or "update_entity"
+            || name.StartsWith("reload", StringComparison.Ordinal);
+    }
+
+    /// <summary>Formats a duration the way a person would say it.</summary>
+    public static string Duration(TimeSpan span)
+    {
+        if (span.TotalSeconds < 90) return $"{Math.Round(span.TotalSeconds)} seconds";
+        if (span.TotalMinutes < 90) return $"{Math.Round(span.TotalMinutes)} minutes";
+        if (span.TotalHours < 48) return $"{Math.Round(span.TotalHours, 1)} hours";
+        return $"{Math.Round(span.TotalDays, 1)} days";
+    }
+
+    public static string Number(double value)
+    {
+        var rounded = Math.Round(value, 2);
+
+        // Rounding a small negative number gives negative zero, which prints as "-0" and compares unequal to
+        // "0" as text -- so a reading of -0.004 was shown as "-0" and slipped past the guard that drops a move
+        // too small to see. It is zero; it is written as zero.
+        if (rounded == 0) rounded = 0;
+
+        return rounded.ToString(CultureInfo.InvariantCulture);
+    }
+}

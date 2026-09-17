@@ -1,0 +1,29 @@
+{
+  "profiles": {
+    "Housekeeper.Api": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "launchUrl": "dashboard",
+      "applicationUrl": "http://127.0.0.1:5080",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "HOUSEKEEPER_DATA_DIR": "../../.localdata",
+        "HOUSEKEEPER__Storage__Path": "../../.localdata/housekeeper.db"
+      }
+    },
+    "Housekeeper.Api (scanning off)": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "launchUrl": "settings",
+      "applicationUrl": "http://127.0.0.1:5080",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "HOUSEKEEPER_DATA_DIR": "../../.localdata",
+        "HOUSEKEEPER__Storage__Path": "../../.localdata/housekeeper.db",
+        "HOUSEKEEPER__Scan__Enabled": "false"
+      }
+    }
+  }
+}

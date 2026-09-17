@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Housekeeper.Core/Housekeeper.Core.csproj" />
+    <Project Path="src/Housekeeper.Api/Housekeeper.Api.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Housekeeper.Tests/Housekeeper.Tests.csproj" />
+  </Folder>
+</Solution>

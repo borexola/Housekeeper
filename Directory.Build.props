@@ -1,6 +1,6 @@
 <Project>
   <!--
-    Central build properties for HearthSense.
+    Central build properties for Housekeeper.
     Keep this minimal and shared; project-specific settings live in each .csproj.
   -->
   <PropertyGroup>
@@ -17,9 +17,9 @@
     <Deterministic>true</Deterministic>
     <NeutralLanguage>en</NeutralLanguage>
     <Version>0.1.0</Version>
-    <Authors>HearthSense Contributors</Authors>
-    <Product>HearthSense</Product>
-    <Copyright>Copyright (c) 2026 HearthSense Contributors</Copyright>
+    <Authors>Housekeeper Contributors</Authors>
+    <Product>Housekeeper</Product>
+    <Copyright>Copyright (c) 2026 Housekeeper Contributors</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <!-- SQLite + WAL are used for local persistence; keep native libs out of publish noise -->
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
