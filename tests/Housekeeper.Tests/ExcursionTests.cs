@@ -15,7 +15,12 @@ public class ExcursionTests
 
     private static ScanOptions Options => new();
 
-    /// <summary>A fortnight of readings near a hundred, twenty minutes apart, ending just before <paramref name="until"/>.</summary>
+    /// <summary>
+    /// Forty readings near a hundred, twenty minutes apart (a little over thirteen hours), ending just before
+    /// <paramref name="until"/>. Long enough to be judged at all, past the six-hour and thirty-reading
+    /// minimums, and deliberately far too short for the time-of-day or time-of-week baselines, so every test
+    /// here runs against the all-history one.
+    /// </summary>
     private static List<StateSample> Baseline(DateTimeOffset until)
     {
         var step = TimeSpan.FromMinutes(20);

@@ -226,7 +226,8 @@ public class ConcernServiceTests : StoreFixture
         Assert.Equal(0, await service.ReadPendingAsync(CancellationToken.None));
         Assert.Equal(calls, _llm.Calls);
 
-        Clock.Advance(TimeSpan.FromMinutes(6));
+        // Long enough for the gap, which doubles per failed try.
+        Clock.Advance(TimeSpan.FromMinutes(20));
         Assert.Equal(1, await service.ReadPendingAsync(CancellationToken.None));
 
         var read = (await Store.GetConcernAsync(concern.Id, CancellationToken.None))!;

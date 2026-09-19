@@ -552,7 +552,8 @@ public sealed class AnomalyScanner(
     /// </summary>
     public const string ClosedBecause = "closed_because";
 
-    private static string WithReason(string evidenceJson, string reason) =>
+    /// <summary>Writes why a finding was closed into its evidence. Public so every caller that closes one words it the same way.</summary>
+    public static string WithReason(string evidenceJson, string reason) =>
         WithValue(evidenceJson, ClosedBecause, System.Text.Json.Nodes.JsonValue.Create(reason));
 
     private static string WithValue(string evidenceJson, string key, System.Text.Json.Nodes.JsonNode? value)
@@ -842,10 +843,30 @@ public sealed class AnomalyScanner(
         {
             var existing = await store.FindAnomalyAsync(habit.DedupKey, cancellationToken).ConfigureAwait(false);
 
-            // Put away or promoted: the sentence is kept current, no slot is taken.
-            if (existing is { Status: AnomalyStatus.Dismissed or AnomalyStatus.Promoted })
+            // Put away: the sentence is kept current, no slot is taken. RaiseAsync never reopens a dismissed
+            // routine, so this is only a refresh.
+            if (existing is { Status: AnomalyStatus.Dismissed })
             {
                 await TryRaiseAsync(habit, scan, now, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            // Promoted: a draft exists for it. Refreshed directly rather than through RaiseAsync, which
+            // after the quiet period would reopen it as a fresh card -- with its old proposal id still
+            // attached and a second "Make an automation" button -- uncounted against the cap. A promoted
+            // routine leaves that state when the draft is confirmed (it becomes automated and closes) or
+            // when the draft is rejected, which reopens the finding through the proposal path.
+            if (existing is { Status: AnomalyStatus.Promoted })
+            {
+                await store.UpdateAnomalyAsync(
+                    existing with
+                    {
+                        Summary = habit.Summary,
+                        EvidenceJson = habit.EvidenceJson,
+                        SuggestedRequest = habit.SuggestedRequest,
+                        Severity = habit.Severity,
+                    },
+                    cancellationToken).ConfigureAwait(false);
                 continue;
             }
 
@@ -1114,9 +1135,7 @@ public sealed class AnomalyScanner(
                     {
                         Status = AnomalyStatus.Open,
                         Summary = anomaly.Summary,
-                        EvidenceJson = existing.Dismissals > 0
-                            ? WithValue(anomaly.EvidenceJson, "dismissed_before", System.Text.Json.Nodes.JsonValue.Create(existing.Dismissals))
-                            : anomaly.EvidenceJson,
+                        EvidenceJson = anomaly.EvidenceJson,
                         SuggestedRequest = anomaly.SuggestedRequest,
                         Severity = anomaly.Severity,
                         DetectedUtc = now,

@@ -135,7 +135,7 @@ things. Narrow it with **Ignore** rather than by listing what you want — that 
 buttons write to, and it keeps working as you add devices. If you would rather name what to watch, turn
 **Watch everything** off and fill in **Watch**; the settings page warns if you leave both empty.
 
-On a large install the `MaxTrackedEntities` cap matters: the sun and the entities a routine could be about are kept first, then readings, then Home Assistant's own machinery, so watching
+On a large install the `MaxTrackedEntities` cap matters. When it binds, the first entities in priority order are watched — the sun, then what a routine is made of (lights, switches, covers, locks, fans, media players, motion and door sensors, people), then readings, with Home Assistant's own machinery (automations, scripts, buttons, helpers) dropped first, and by id within each tier. Watching
 everything on a house with more entities than the cap silently watches the alphabetically-first ones. The
 dashboard's Watching tile shows the number actually observed, so compare it against what Home Assistant
 reports and raise the cap or add Ignore globs if it is short.
@@ -152,7 +152,7 @@ accumulate. That is working correctly, not a fault.
 | `Api.TokenEnvironmentVariable` | `HOUSEKEEPER_API_TOKEN` | |
 | `Api.IngressAddress` | *(empty)* | One IP allowed in without a token because something in front already authenticated the caller. The add-on sets it to the Supervisor, `172.30.32.2`. Leave empty otherwise. |
 | `Storage.Path` | `housekeeper.db` | **restart** · `/data/housekeeper.db` in the container. |
-| `Storage.KeepDecidedFor` | `30d` | How long rejected, failed, superseded and removed proposals are kept. Drafts and live automations are never pruned. |
+| `Storage.KeepDecidedFor` | `30d` | How long rejected, failed, superseded and removed proposals are kept, and how long dismissed and resolved findings are kept — the latter measured from the longer of this and `Scan.RedetectAfter`, so a dismissal is never forgotten while it is still keeping something quiet. Drafts, live automations, routines you put away and findings dismissed three times are never pruned. |
 
 The settings page refuses to bind to a network address unless an API token is set, and refuses to clear the
 API token while it is already bound to one. Locking yourself out of your own automation writer should take

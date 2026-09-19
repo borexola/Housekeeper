@@ -137,13 +137,17 @@ function concernCard(c) {
   if (c.names && c.names.length) card.append(chips('Watching', c.names));
   else card.append(el('div', 'meta', c.provisional
     ? 'Nothing is being watched for this yet. It will be read again once the model answers, or press Read again.'
-    : 'Nothing is being watched for this yet. Try wording it with the room or the device, then remove this one.'));
+    : c.canReread
+      ? 'Nothing is being watched for this yet. Press Read again once the model is working, or try wording it with the room or the device.'
+      : 'Nothing is being watched for this yet. Try wording it with the room or the device, then remove this one.'));
 
   if (c.note) card.append(noteLine(c.note));
 
   const status = el('div', 'status');
   const row = el('div', 'row actions');
-  if (c.provisional) {
+  // Offered whenever the model has not read it, not only while the tick still means to try: a concern the
+  // tick has given up on says "press Read again", and the button has to be there when it does.
+  if (c.canReread) {
     row.append(action('Read again', async () => {
       const read = await call('api/concerns/' + c.id + '/reread', { method: 'POST', headers: headers(false) });
       toast(read.provisional ? 'Still could not be read by the model; matched by name for now.' : 'Read by the model.', read.provisional ? 'err' : null);

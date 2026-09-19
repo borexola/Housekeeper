@@ -240,9 +240,10 @@ function anomalyCard(a, proposalsById) {
   if (a.status === 'Open' && a.kind !== 'Concern') card.append(el('div', 'gauge', gaugeText(a)));
 
   // A finding the user has dismissed before came back only because it is further over its line; say so,
-  // and say what the next dismissal does.
-  if (a.status === 'Open' && evidence.dismissed_before) {
-    const n = evidence.dismissed_before;
+  // and say what the next dismissal does. The count is on the row itself, so every refresh carries it;
+  // it was in the evidence once, which the next scan's refresh overwrote a few minutes later.
+  if (a.status === 'Open' && a.dismissals > 0) {
+    const n = a.dismissals;
     card.append(el('div', 'meta', 'You dismissed this ' + (n === 1 ? 'once' : n === 2 ? 'twice' : n + ' times')
       + ' before, and it has come back further over its line. ' + (n >= 2 ? 'One more dismissal silences it for good.' : 'A third dismissal would silence it for good.')));
   }
@@ -330,7 +331,14 @@ function routinesNote(r) {
 }
 
 function renderFindings(container, items, proposalsById, empty, routines) {
-  const note = { key: 'routines-note', print: JSON.stringify(routines || null), build: () => routinesNote(routines) };
+  // The note says how long ago routines were looked for, so like a card's "noticed ... ago" it is reworded
+  // on every refresh even though the search itself only runs once an hour.
+  const note = {
+    key: 'routines-note',
+    print: JSON.stringify(routines || null),
+    build: () => routinesNote(routines),
+    touch: (node) => { const text = routinesNote(routines).textContent; if (node.textContent !== text) node.textContent = text; },
+  };
   if (!items || !items.length) {
     reconcile(container, [{ key: 'empty', print: empty.textContent, build: () => empty }, note]);
     return;

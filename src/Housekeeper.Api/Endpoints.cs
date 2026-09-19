@@ -51,7 +51,8 @@ public sealed record ConcernRequest(string? Text);
 /// <param name="Names">The friendly name of each watched entity, in the same order, so the card need not translate ids.</param>
 /// <param name="HasRule">False when the rule is only "pay closer attention", which is not worth a label.</param>
 /// <param name="Note">Why the model's reading is missing, if it is. Null when the model read it.</param>
-/// <param name="Provisional">True while the model has not had its say and will be asked again.</param>
+/// <param name="Provisional">True while the model has not had its say and the scan's tick will ask again.</param>
+/// <param name="CanReread">True when the model has not read this concern, so asking it again could change something.</param>
 public sealed record ConcernView(
     long Id,
     string Text,
@@ -63,6 +64,7 @@ public sealed record ConcernView(
     bool Interpreted,
     string? Note,
     bool Provisional,
+    bool CanReread,
     DateTimeOffset CreatedUtc);
 
 public static class Endpoints
@@ -532,8 +534,20 @@ public static class Endpoints
             {
                 if (open.Kind == AnomalyKind.MissingEntity || !set.Contains(open.EntityId)) continue;
 
-                await store.UpdateAnomalyAsync(
-                    open with { Status = AnomalyStatus.Dismissed, DecidedUtc = now }, cancellationToken).ConfigureAwait(false);
+                // A routine is closed rather than dismissed. "Not this one" is permanent -- the row is never
+                // pruned and never re-offered -- and ignoring an entity for an unrelated finding is not the
+                // user saying that about a routine they were never asked about. Closed, it prunes normally
+                // and is offered again if the entity is watched once more.
+                var closed = open.Kind == AnomalyKind.Habit
+                    ? open with
+                    {
+                        Status = AnomalyStatus.Resolved,
+                        DecidedUtc = now,
+                        EvidenceJson = AnomalyScanner.WithReason(open.EvidenceJson, "It is no longer on the watch list."),
+                    }
+                    : open with { Status = AnomalyStatus.Dismissed, DecidedUtc = now };
+
+                await store.UpdateAnomalyAsync(closed, cancellationToken).ConfigureAwait(false);
                 dismissed++;
             }
 
@@ -659,6 +673,7 @@ public static class Endpoints
         concern.Interpreted,
         concern.Note,
         concern.Provisional,
+        !concern.Interpreted,
         concern.CreatedUtc);
 
     internal static AnomalyView View(Anomaly anomaly) => new(

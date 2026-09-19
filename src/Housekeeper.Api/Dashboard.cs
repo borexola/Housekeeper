@@ -398,7 +398,9 @@ function proposalCard(p) {
     const refineRow = el('div', 'row refine-row');
     const refine = action('Refine', async () => {
       const text = feedback.value.trim();
-      if (!text) { tell(status, 'Say what should change first.', 'err'); return; }
+      // Thrown rather than returned: action() treats a return as success, and would reload the list and
+      // then call after(undefined).
+      if (!text) throw new Error('Say what should change first.');
       tell(status, 'Asking the model for a new draft. This usually takes 10–60 seconds.');
       const refined = await call('api/proposals/' + p.id + '/refine',
         { method: 'POST', headers: headers(true), body: JSON.stringify({ feedback: text }) });

@@ -131,11 +131,16 @@ from one in every scan. The entities it names are judged with every bar lowered 
 (`Concerns.Evaluate`), raising a `Concern` finding above everything else when it fires. A concern finding
 closes when the entity was looked at and the rule did not fire, or when the concern is removed.
 
-The model's part is the reading, done when the concern is added and never during a scan. When the model
-could not be asked — not chosen, down, or answering unusably — the concern is saved matched by name and
-marked provisional, with the reason kept apart from what was matched, and the scan's tick asks the model
-again, one concern at a time, until it has had its say; a **Read again** button does the same on demand. A
-model that read the concern and named nothing is an answer, not a wait.
+The model's part is the reading, done when the concern is added; a scan never re-reads a concern the model
+has already had its say on. When the model could not be asked — not chosen, down, or answering unusably —
+the concern is saved matched by name and marked provisional, with the reason kept apart from what was
+matched. Each scan tick then asks about at most one provisional concern, after the scan rather than before
+it so a slow model cannot delay the scan, least recently tried first, with a gap that doubles per failed try
+up to an hour. A model that was down is simply tried again later; one that answers unusably three times has
+the concern left matched by name, no longer provisional, with a note saying so. A **Read again** button
+asks on demand in either case, and a model that read the concern and named nothing is an answer, not a
+wait. A concern the model has already read keeps that reading when a later attempt fails, so asking again
+while the model is down cannot trade a rule for a name match.
 [`ConcernService`](../src/Housekeeper.Core/ConcernService.cs) shows it the concern and a shortlist of the
 house and asks for entity ids, a kind and a value; only ids that exist survive, exactly as with a draft. If
 the model is not configured or does not answer, `Concerns.Match` stands in — the concern's words against

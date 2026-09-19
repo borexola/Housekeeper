@@ -32,7 +32,14 @@ public sealed record HaEntity(
     string? EntityCategory = null,
 
     /// <summary>Hidden by the user in Home Assistant, which is them saying they do not want to see it.</summary>
-    bool Hidden = false)
+    bool Hidden = false,
+
+    /// <summary>
+    /// The area's id in Home Assistant's registry, which is made from the name it was created with and does
+    /// not change when it is renamed. What an automation targets, so it is what an automation is matched on;
+    /// <see cref="Area"/> is the name, which is what a person reads.
+    /// </summary>
+    string? AreaId = null)
 {
     /// <summary>The part before the first dot, e.g. <c>light</c> for <c>light.kitchen</c>.</summary>
     public string Domain => Ha.DomainOf(EntityId);

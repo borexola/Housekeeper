@@ -286,8 +286,35 @@ public class SqliteStoreTests : StoreFixture
         Assert.Equal(5, loaded.ParentId);
         Assert.Equal(Clock.GetUtcNow(), loaded.DismissedUtc);
 
-        // And the column the newest step added is really filtered on, not merely stored.
+        // And the column the third step added is really filtered on, not merely stored.
         Assert.Empty(await Store.ListProposalsAsync(null, 50, false, CancellationToken.None));
+
+        // The later rungs touch other tables, so everything above would pass with either of them missing.
+        var concern = await Store.AddConcernAsync(new Concern
+        {
+            Text = "the freezer warming up",
+            Note = "the model was down",
+            Provisional = true,
+            CreatedUtc = Clock.GetUtcNow(),
+        }, CancellationToken.None);
+
+        var readBack = await Store.GetConcernAsync(concern.Id, CancellationToken.None);
+        Assert.Equal("the model was down", readBack!.Note);
+        Assert.True(readBack.Provisional);
+
+        var finding = await Store.UpsertAnomalyAsync(new Anomaly
+        {
+            DedupKey = "stuck:binary_sensor.freezer_door",
+            EntityId = "binary_sensor.freezer_door",
+            Kind = AnomalyKind.StuckState,
+            Summary = "open too long",
+            SuggestedRequest = "notify me",
+            Status = AnomalyStatus.Open,
+            Dismissals = 2,
+            DetectedUtc = Clock.GetUtcNow(),
+        }, CancellationToken.None);
+
+        Assert.Equal(2, (await Store.GetAnomalyAsync(finding.Id, CancellationToken.None))!.Dismissals);
     }
 
     /// <summary>

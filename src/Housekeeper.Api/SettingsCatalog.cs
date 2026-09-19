@@ -302,9 +302,11 @@ public static class SettingsCatalog
             "Where the SQLite database is written. The settings and secrets files stay in the data directory regardless.",
             SettingKind.Text, o => o.Storage.Path, RestartRequired: true),
 
-        new("Housekeeper:Storage:KeepDecidedFor", "Storage", "Keep finished proposals for",
-            "Rejected, failed, superseded and removed proposals older than this are deleted on each scan. "
-            + "Drafts and live automations are always kept.",
+        new("Housekeeper:Storage:KeepDecidedFor", "Storage", "Keep decided proposals and findings for",
+            "Rejected, failed, superseded and removed proposals older than this are deleted on each scan, as are "
+            + "dismissed and resolved findings older than the longer of this and the dismissal quiet period, so a "
+            + "dismissal is never forgotten while it is still keeping something quiet. Drafts, live automations, "
+            + "routines you put away and findings you dismissed three times are always kept.",
             SettingKind.Duration, o => o.Storage.KeepDecidedFor),
 
         // ---- Secrets ----

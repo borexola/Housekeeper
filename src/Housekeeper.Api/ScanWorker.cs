@@ -71,9 +71,27 @@ public sealed class ScanWorker(
             // Published before the wait, so the dashboard counts down to the tick that is really coming.
             scanner.NextUtc = scan.Enabled ? clock.GetUtcNow() + interval : null;
 
+            if (scan.Enabled)
+            {
+                try
+                {
+                    await scanner.ScanAsync(stoppingToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Scan failed; retrying in {Interval}.", interval);
+                }
+            }
+
             // A concern added while the model was down, or before one was chosen, is read the moment it can
             // be. On the scan's tick whether or not scanning is on, because the concern is the user's ask
-            // and the model coming back is the whole of what it is waiting for.
+            // and the model coming back is the whole of what it is waiting for -- but AFTER the scan, since
+            // a model that takes its full timeout to answer would otherwise delay the scan the dashboard is
+            // counting down to by a minute and a half, every tick, for as long as it stayed slow.
             try
             {
                 if (await concerns.ReadPendingAsync(stoppingToken).ConfigureAwait(false) > 0)
@@ -86,21 +104,6 @@ public sealed class ScanWorker(
             catch (Exception ex)
             {
                 logger.LogWarning(ex, "Could not read a pending concern; it will be tried again next tick.");
-            }
-
-            if (!scan.Enabled) continue;
-
-            try
-            {
-                await scanner.ScanAsync(stoppingToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Scan failed; retrying in {Interval}.", interval);
             }
         }
         while (await SafeWaitAsync(timer, stoppingToken).ConfigureAwait(false));

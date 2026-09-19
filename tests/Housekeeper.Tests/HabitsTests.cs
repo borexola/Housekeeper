@@ -430,17 +430,26 @@ public class HabitScanTests : StoreFixture
     [Fact]
     public async Task The_house_time_zone_comes_from_Home_Assistant_and_falls_back_to_the_process()
     {
-        _ha.TimeZone = "UTC";
+        // A house zone whose offset differs from the process's own, so a held answer and a fallback to the
+        // process's zone can never look alike -- on CI, where both would otherwise be UTC, the old version
+        // of this test could not tell the fallback from a stale cache. Taken from the zones this host really
+        // has: a Windows host without the IANA data cannot resolve "Pacific/Auckland" by that name.
+        var house = TimeZoneInfo.GetSystemTimeZones()
+            .First(zone => zone.BaseUtcOffset != TimeZoneInfo.Local.BaseUtcOffset);
+
+        _ha.TimeZone = house.Id;
         var scanner = Scanner(Options());
-        Assert.Equal(TimeSpan.Zero, (await scanner.ZoneAsync(Clock.GetUtcNow(), CancellationToken.None)).BaseUtcOffset);
+        Assert.Equal(house.BaseUtcOffset, (await scanner.ZoneAsync(Clock.GetUtcNow(), CancellationToken.None)).BaseUtcOffset);
 
         // Held for hours, so a Home Assistant asked every scan is not asked every scan.
         _ha.TimeZone = "Not/AZone";
-        Assert.Equal(TimeSpan.Zero, (await scanner.ZoneAsync(Clock.GetUtcNow(), CancellationToken.None)).BaseUtcOffset);
+        Assert.Equal(house.BaseUtcOffset, (await scanner.ZoneAsync(Clock.GetUtcNow(), CancellationToken.None)).BaseUtcOffset);
 
         // Once it is asked again and cannot resolve the answer, the process's own zone stands in.
         Clock.Advance(TimeSpan.FromHours(7));
-        Assert.Equal(TimeZoneInfo.Local.Id, (await scanner.ZoneAsync(Clock.GetUtcNow(), CancellationToken.None)).Id);
+        var fallback = await scanner.ZoneAsync(Clock.GetUtcNow(), CancellationToken.None);
+        Assert.Equal(TimeZoneInfo.Local.Id, fallback.Id);
+        Assert.NotEqual(house.BaseUtcOffset, fallback.BaseUtcOffset);
     }
 }
 

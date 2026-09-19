@@ -33,8 +33,12 @@ public sealed class ConcernService(
     /// <summary>One reading at a time, so the tick and a Read again cannot each ask the model about the same concern.</summary>
     private readonly SemaphoreSlim _reading = new(1, 1);
 
-    /// <summary>What the tick has tried per concern: how many times, and when last, so it rotates and backs off.</summary>
-    private readonly ConcurrentDictionary<long, (int Attempts, DateTimeOffset LastUtc)> _tries = new();
+    /// <param name="Failures">Every try that did not end in an answer, which is what the gap between tries grows on.</param>
+    /// <param name="Strikes">Tries the model answered unusably. Only these count towards giving up: a model that is down is not wrong, it is absent.</param>
+    private readonly record struct Tried(int Failures, int Strikes, DateTimeOffset LastUtc);
+
+    /// <summary>What the tick has tried per concern, so it rotates between them and backs off.</summary>
+    private readonly ConcurrentDictionary<long, Tried> _tries = new();
 
     public Task<IReadOnlyList<Concern>> ListAsync(CancellationToken cancellationToken) => store.ListConcernsAsync(cancellationToken);
 
@@ -81,10 +85,11 @@ public sealed class ConcernService(
     /// Reads one concern the model has not yet had its say on, if there is one, a model is configured, and
     /// its turn has come. Called on each scan tick, so a concern added while the model was down is read the
     /// moment it is back rather than left matched by name for ever -- one at a time, because a local model
-    /// takes tens of seconds and a scan should not wait behind five of them; never-tried ones first, so one
-    /// the model keeps failing on does not starve the rest; and with a backoff that doubles per failed try,
-    /// so a model that is down costs one call per tick at most and one that answers unusably stops being
-    /// asked after <see cref="MostAutomaticReads"/> tries. Returns how many were read to completion.
+    /// takes tens of seconds and a scan should not wait behind five of them; least recently tried first, so
+    /// one the model keeps failing on does not starve the rest; and with a gap that doubles per failed try up
+    /// to an hour, so a model that is down is asked ever less often rather than every tick. An answer that
+    /// cannot be read counts a strike, and after <see cref="MostAutomaticReads"/> the tick stops asking and
+    /// leaves it to the Read again button. Returns how many were read to completion.
     /// </summary>
     public async Task<int> ReadPendingAsync(CancellationToken cancellationToken)
     {
@@ -94,10 +99,16 @@ public sealed class ConcernService(
         var now = clock.GetUtcNow();
         var interval = settings.Current.Scan.Interval > TimeSpan.Zero ? settings.Current.Scan.Interval : TimeSpan.FromMinutes(5);
 
+        // Half an interval of slack, because a PeriodicTimer re-arms at period-minus-lateness: two
+        // consecutive ticks can be a few milliseconds under one interval apart, and without the slack the
+        // concern would be skipped on the tick its backoff lands on and read on the one after.
+        var slack = interval / 2;
+
         var pending = (await store.ListConcernsAsync(cancellationToken).ConfigureAwait(false))
             .Where(concern => concern.Provisional)
             .Select(concern => (Concern: concern, Tried: _tries.GetValueOrDefault(concern.Id)))
-            .Where(pair => pair.Tried.Attempts < MostAutomaticReads && now - pair.Tried.LastUtc >= Backoff(interval, pair.Tried.Attempts))
+            .Where(pair => pair.Tried.Strikes < MostAutomaticReads &&
+                           now - pair.Tried.LastUtc >= Backoff(interval, pair.Tried.Failures) - slack)
             .OrderBy(pair => pair.Tried.LastUtc)
             .ThenBy(pair => pair.Concern.Id)
             .Select(pair => pair.Concern)
@@ -113,31 +124,39 @@ public sealed class ConcernService(
             return 1;
         }
 
-        // Down is not the same as wrong. A model that did not answer is tried again with a growing gap; one
-        // that answered unusably counts a strike, and after three the tick leaves it to the button.
+        // Down is not the same as wrong. Either way the gap before the next try doubles, so a model that is
+        // down costs one call a tick at first and then less; but only an unusable answer counts a strike,
+        // and after three of those the tick leaves it to the button, because a model answering the same
+        // prompt at the same temperature is unlikely to change its mind.
         var tried = _tries.GetValueOrDefault(pending.Id);
-        var attempts = outcome == Outcome.Unusable ? tried.Attempts + 1 : tried.Attempts;
-        _tries[pending.Id] = (attempts, now);
+        var strikes = outcome == Outcome.Unusable ? tried.Strikes + 1 : tried.Strikes;
+        _tries[pending.Id] = new Tried(tried.Failures + 1, strikes, now);
 
-        if (attempts >= MostAutomaticReads)
+        if (strikes >= MostAutomaticReads)
         {
+            // Written whole rather than appended: the note it would be appended to says "It will be asked
+            // again", which is true until this moment and a contradiction after it.
             var parked = read with
             {
-                Note = read.Note + $" The model has answered unusably {MostAutomaticReads} times, so it will not be asked again on its own; press Read again to try once more.",
+                Note = $"The model's answer could not be read {MostAutomaticReads} times, so this stays matched by name and will not be asked again on its own; press Read again to try once more.",
                 Provisional = false,
             };
             await store.UpdateConcernAsync(parked, cancellationToken).ConfigureAwait(false);
-            logger.LogWarning("Concern {ConcernId} was answered unusably {Attempts} times; leaving it matched by name.", pending.Id, attempts);
+            logger.LogWarning("Concern {ConcernId} was answered unusably {Strikes} times; leaving it matched by name.", pending.Id, strikes);
         }
 
         return 0;
     }
 
-    /// <summary>How long the tick waits before asking again: the scan interval, doubling per failed try, capped at a day.</summary>
-    internal static TimeSpan Backoff(TimeSpan interval, int attempts)
+    /// <summary>
+    /// How long the tick waits before asking again: the scan interval, doubling per failed try, capped at an
+    /// hour. An hour rather than a day because the commonest failure is a model that is simply not running
+    /// yet, and a concern added during that should be read soon after it comes back, not tomorrow.
+    /// </summary>
+    internal static TimeSpan Backoff(TimeSpan interval, int failures)
     {
-        var scaled = interval.TotalSeconds * Math.Pow(2, Math.Min(attempts, 12));
-        return TimeSpan.FromSeconds(Math.Min(scaled, TimeSpan.FromDays(1).TotalSeconds));
+        var scaled = interval.TotalSeconds * Math.Pow(2, Math.Min(failures, 12));
+        return TimeSpan.FromSeconds(Math.Min(scaled, TimeSpan.FromHours(1).TotalSeconds));
     }
 
     private async Task<(Concern? Concern, Outcome Outcome)> ReadAgainAsync(long id, bool onlyIfProvisional, CancellationToken cancellationToken)

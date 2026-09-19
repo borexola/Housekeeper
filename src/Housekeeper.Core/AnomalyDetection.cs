@@ -201,10 +201,13 @@ public static class AnomalyDetection
             kinds.Add(AnomalyKind.StuckState);
 
         // DetectNumericOutlier: a number, with a baseline of EARLIER readings that is both long enough and
-        // wide enough, AND a reading that has come back inside the range and stayed there. Raising waits
+        // wide enough, AND a reading the detector would no longer raise for, held for the wait. Raising waits
         // for a reading to stay out; closing on the first reading back in was the same flap from the other
-        // side -- a card that vanished on one poll and returned as "noticed just now" on the next.
-        if (NumericJudgeable(entity, history, options) && BackInside(entity, history, options, nowUtc))
+        // side -- a card that vanished on one poll and returned as "noticed just now" on the next. A baseline
+        // that has since become a ratchet is closed too: nothing could ever refresh or close the card
+        // otherwise, and it is quoting a reading the sensor no longer shows.
+        if (NumericJudgeable(entity, history, options) &&
+            (Normal(entity, history, options) is null || BackInside(entity, history, options, nowUtc)))
             kinds.Add(AnomalyKind.NumericOutlier);
 
         // DetectUnavailable: it is reporting again, and was watched long enough for that to mean something.
@@ -641,11 +644,17 @@ public static class AnomalyDetection
     /// The start of the run of readings, ending at the current one, for which <paramref name="holds"/> is
     /// true, allowing a brief flicker in the middle. See <see cref="ExcursionStart"/> for the rules.
     /// </summary>
+    /// <param name="enough">
+    /// Stop as soon as the run is this long. The caller that only needs to know whether the run reaches the
+    /// wait passes it, so the walk costs a handful of readings rather than every row in the history; the
+    /// caller that reports "and has for X" passes null and walks to the real beginning.
+    /// </param>
     private static DateTimeOffset RunStart(
         HaEntity entity,
         IReadOnlyList<(DateTimeOffset ChangedUtc, double Value)> newestFirst,
         Func<double, bool> holds,
-        TimeSpan wait)
+        TimeSpan wait,
+        TimeSpan? enough = null)
     {
         var flicker = TimeSpan.FromTicks(Math.Max(wait.Ticks / 5, TimeSpan.FromSeconds(30).Ticks));
 
@@ -653,23 +662,31 @@ public static class AnomalyDetection
         var lastHeld = entity.LastChanged;
         int seen = 0, broken = 0;
 
+        // Whether the reading just newer than this one broke the run. The gap test belongs to the reading
+        // that bridges a break, not to every reading after one: applying it throughout cut a three-hour
+        // excursion short at the first wide gap in the thinned history that happened to follow a blip.
+        var afterBreak = false;
+
         foreach (var (changedUtc, value) in newestFirst)
         {
             // The reading being judged; it holds by construction.
             if (changedUtc == entity.LastChanged) continue;
+            if (enough is { } reached && entity.LastChanged - start >= reached) break;
 
             seen++;
             if (holds(value))
             {
                 // Bridging a break is only allowed when it was brief; otherwise this is an earlier, separate run.
-                if (broken > 0 && lastHeld - changedUtc > flicker) break;
+                if (afterBreak && lastHeld - changedUtc > flicker) break;
 
+                afterBreak = false;
                 start = changedUtc;
                 lastHeld = changedUtc;
                 continue;
             }
 
             broken++;
+            afterBreak = true;
             if (broken > Math.Max(1, seen / 5)) break;
         }
 
@@ -687,14 +704,45 @@ public static class AnomalyDetection
         if (entity.Numeric is not { } current) return false;
         if (Normal(entity, history, options) is not { } normal) return false;
 
-        var (_, _, _, median, spread) = normal;
+        var (_, _, values, median, spread) = normal;
+
+        // "Back" is whatever the detector would not raise for, not merely "near the middle". A plug that
+        // settles into a mode it occupies every evening -- the television at 120 W on a baseline of 0.5 W --
+        // is somewhere this entity already goes, which is exactly why the detector says nothing about it;
+        // measuring "back" only against the median left that card open all night quoting the console's 160 W.
         var bar = Math.Max(options.OutlierThreshold * spread, Baselines.MinimumMove(entity, median, current, options.MinimumEffect));
+        bool Inside(double value) => Math.Abs(value - median) < bar || Baselines.IsKnownMode(values, value, spread);
 
-        bool Inside(double value) => Math.Abs(value - median) < bar;
-        if (!Inside(current)) return false;
+        // The current reading is judged in full, against every gate the detector applies, so raising and
+        // closing cannot disagree about the state the entity is in right now.
+        if (Outlying(entity, values, median, spread, current, options)) return false;
 
-        var since = RunStart(entity, ReadingsNewestFirst(entity, history), Inside, options.MinimumExcursion);
+        // The detector will not raise for this reading, and it is not near normal either: the only way to
+        // reach here is a reading the threshold rule can find no room for. Nothing could ever refresh or
+        // close the card, and it is quoting a value the sensor no longer shows, so it is over.
+        if (!Inside(current)) return true;
+
+        var since = RunStart(entity, ReadingsNewestFirst(entity, history), Inside, options.MinimumExcursion, options.MinimumExcursion);
         return nowUtc - since >= options.MinimumExcursion;
+    }
+
+    /// <summary>
+    /// Whether the detector would raise for this reading against this baseline: every gate after the
+    /// z-score, in the same order <see cref="DetectNumericOutlier"/> applies them. Shared so that what
+    /// raises a finding and what closes it can never drift apart.
+    /// </summary>
+    private static bool Outlying(HaEntity entity, double[] values, double median, double spread, double value, ScanOptions options)
+    {
+        var move = Math.Abs(value - median);
+        var z = move / spread;
+        if (!double.IsFinite(z) || z < options.OutlierThreshold) return false;
+        if (Ha.Number(value) == Ha.Number(median)) return false;
+
+        var smallest = Baselines.MinimumMove(entity, median, value, options.MinimumEffect);
+        if (move < smallest) return false;
+        if (Baselines.IsKnownMode(values, value, spread)) return false;
+
+        return Threshold(values, median, spread, value, value > median, smallest) is not null;
     }
 
     /// <summary>

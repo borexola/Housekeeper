@@ -191,13 +191,18 @@ public static class Concerns
         if (tokens.Count == 0) return [];
 
         var wanted = new HashSet<string>(tokens, StringComparer.Ordinal);
-        HashSet<string> domains = new(StringComparer.Ordinal);
-        HashSet<string> classes = new(StringComparer.Ordinal);
+
+        // How many of the concern's words imply each domain and each device class. A count rather than a
+        // set, because it is what ranks a lock above a blind for "a door left unlocked": both are implied
+        // by "door", only the lock is implied by "unlocked" as well. With more matches than the cap allows,
+        // a flat score dropped whatever sorted last, which for that concern was every lock.
+        Dictionary<string, int> domains = new(StringComparer.Ordinal);
+        Dictionary<string, int> classes = new(StringComparer.Ordinal);
         foreach (var token in tokens)
         {
             if (!Kinds.TryGetValue(token, out var kind)) continue;
-            foreach (var domain in kind.Domains) domains.Add(domain);
-            foreach (var deviceClass in kind.Classes) classes.Add(deviceClass);
+            foreach (var domain in kind.Domains) domains[domain] = domains.GetValueOrDefault(domain) + 1;
+            foreach (var deviceClass in kind.Classes) classes[deviceClass] = classes.GetValueOrDefault(deviceClass) + 1;
         }
 
         // Abstract words are not also looked for in names: "temperature" is in a thousand entity ids and
@@ -218,8 +223,8 @@ public static class Concerns
 
     private static IReadOnlyList<string> Score(
         IReadOnlyList<HaEntity> entities,
-        HashSet<string> domains,
-        HashSet<string> classes,
+        Dictionary<string, int> domains,
+        Dictionary<string, int> classes,
         HashSet<string> specific,
         HashSet<string> particular,
         int max)
@@ -230,8 +235,11 @@ public static class Concerns
             if (entity.Hidden || EntityIndex.RarelyAutomated(entity) || entity.IsConfigOrDiagnostic) continue;
             if (!Watchable.Contains(entity.Domain)) continue;
 
-            var kindMatch = domains.Contains(entity.Domain) ||
-                            (entity.DeviceClass is { } deviceClass && classes.Contains(deviceClass.ToLowerInvariant()));
+            // How many of the concern's kind words point at this entity: "door" and "unlocked" both point
+            // at a lock, only "door" at a blind.
+            var support = domains.GetValueOrDefault(entity.Domain) +
+                          (entity.DeviceClass is { } deviceClass ? classes.GetValueOrDefault(deviceClass.ToLowerInvariant()) : 0);
+            var kindMatch = support > 0;
 
             int named = 0, generic = 0;
             void Count(string? text, int weight)
@@ -253,7 +261,7 @@ public static class Concerns
             // named: "temperature" means every temperature, "freezer temperature" means the freezer's.
             var score = particular.Count > 0
                 ? named + (named > 0 && kindMatch ? 2 : 0)
-                : (kindMatch ? 2 + generic : 0);
+                : (kindMatch ? 2 * support + generic : 0);
 
             if (score > 0) scored.Add((entity, score));
         }

@@ -122,7 +122,7 @@ public sealed class HomeAssistantClient(
             var registry = await ResolveRegistryAsync(cancellationToken).ConfigureAwait(false);
             if (registry.Count > 0)
                 entities = [.. entities.Select(e => registry.TryGetValue(e.EntityId, out var found)
-                    ? e with { Area = found.Area ?? e.Area, DeviceId = found.DeviceId, DeviceName = found.DeviceName }
+                    ? e with { Area = found.Area ?? e.Area, AreaId = found.AreaId, DeviceId = found.DeviceId, DeviceName = found.DeviceName }
                     : e)];
         }
 
@@ -357,12 +357,15 @@ public sealed class HomeAssistantClient(
 
             // An automation built in the editor often targets an area or a device rather than entities.
             // Those are the entities in that area and on that device, as far as this house's own list can
-            // say: device ids match exactly, and an area id is the area's name as Home Assistant slugs it.
+            // say: both are matched on the registry's own ids, which a rename does not change.
             HashSet<string> touched = new(inspection.Entities, StringComparer.Ordinal);
             if (inspection.Areas.Count > 0 || inspection.Devices.Count > 0)
                 foreach (var entity in entities)
                     if ((entity.DeviceId is { } device && inspection.Devices.Contains(device)) ||
-                        (entity.Area is { } area && inspection.Areas.Contains(Slug(area))))
+                        (entity.AreaId is { } areaId && inspection.Areas.Contains(areaId)) ||
+                        // Only when the registry did not say: an area's id is fixed at creation, so slugging
+                        // the name it carries now is wrong the moment the area is renamed.
+                        (entity.AreaId is null && entity.Area is { } area && inspection.Areas.Contains(Slug(area))))
                         touched.Add(entity.EntityId);
 
             var configAlias = document.RootElement.ValueKind == JsonValueKind.Object &&
@@ -381,7 +384,7 @@ public sealed class HomeAssistantClient(
         }
     }
 
-    private sealed record RegistryEntry(string? Area, string? DeviceId, string? DeviceName);
+    private sealed record RegistryEntry(string? Area, string? AreaId, string? DeviceId, string? DeviceName);
 
     /// <summary>
     /// Resolves each entity's area and device in one templated call. Best effort: these sharpen drafting
@@ -391,7 +394,7 @@ public sealed class HomeAssistantClient(
     private async Task<IReadOnlyDictionary<string, RegistryEntry>> ResolveRegistryAsync(CancellationToken cancellationToken)
     {
         const string template =
-            """[{% for s in states %}{% set d = device_id(s.entity_id) %}{"e": {{ s.entity_id | tojson }}, "a": {{ (area_name(s.entity_id) or "") | tojson }}, "d": {{ (d or "") | tojson }}, "n": {{ ((device_attr(d, "name_by_user") or device_attr(d, "name") or "") if d else "") | tojson }}}{{ "," if not loop.last }}{% endfor %}]""";
+            """[{% for s in states %}{% set d = device_id(s.entity_id) %}{"e": {{ s.entity_id | tojson }}, "a": {{ (area_name(s.entity_id) or "") | tojson }}, "i": {{ (area_id(s.entity_id) or "") | tojson }}, "d": {{ (d or "") | tojson }}, "n": {{ ((device_attr(d, "name_by_user") or device_attr(d, "name") or "") if d else "") | tojson }}}{{ "," if not loop.last }}{% endfor %}]""";
 
         Dictionary<string, RegistryEntry> registry = new(StringComparer.Ordinal);
 
@@ -421,10 +424,11 @@ public sealed class HomeAssistantClient(
                 if (string.IsNullOrWhiteSpace(entityId)) continue;
 
                 var area = Text(item, "a");
+                var areaId = Text(item, "i");
                 var deviceId = Text(item, "d");
-                if (area is null && deviceId is null) continue;
+                if (area is null && areaId is null && deviceId is null) continue;
 
-                registry[entityId] = new RegistryEntry(area, deviceId, deviceId is null ? null : Text(item, "n"));
+                registry[entityId] = new RegistryEntry(area, areaId, deviceId, deviceId is null ? null : Text(item, "n"));
             }
 
             return registry;
