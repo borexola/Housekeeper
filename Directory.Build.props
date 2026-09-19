@@ -16,7 +16,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <Deterministic>true</Deterministic>
     <NeutralLanguage>en</NeutralLanguage>
-    <Version>0.1.0</Version>
+    <Version>0.1.1</Version>
     <Authors>Housekeeper Contributors</Authors>
     <Product>Housekeeper</Product>
     <Copyright>Copyright (c) 2026 Housekeeper Contributors</Copyright>

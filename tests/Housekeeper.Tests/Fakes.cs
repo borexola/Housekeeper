@@ -189,10 +189,11 @@ public static class Build
         string? deviceName = null,
         string? stateClass = null,
         string? entityCategory = null,
-        bool hidden = false)
+        bool hidden = false,
+        string? areaId = null)
     {
         var changed = lastChanged ?? DateTimeOffset.UnixEpoch;
-        return new HaEntity(entityId, state, changed, changed, friendlyName, deviceClass, unit, area, automationConfigId, deviceId, deviceName, stateClass, entityCategory, hidden);
+        return new HaEntity(entityId, state, changed, changed, friendlyName, deviceClass, unit, area, automationConfigId, deviceId, deviceName, stateClass, entityCategory, hidden, areaId);
     }
 
     public static AutomationDraft Draft(

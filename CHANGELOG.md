@@ -6,6 +6,8 @@ All notable changes to Housekeeper are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-09-19
+
 ### Added
 - Routines. Once an hour the scanner reads weeks of stored transitions and looks for things you do by hand
   regularly enough that an automation could do them: a light that follows a motion sensor, a door, or a
@@ -606,4 +608,6 @@ All notable changes to Housekeeper are documented here. The format follows
 - The scan worker takes its timers from the injected `TimeProvider`.
 - `launchSettings.json` opens the dashboard on the address the app actually binds.
 
-[Unreleased]: https://github.com/borexola/Housekeeper/commits/main
+[Unreleased]: https://github.com/borexola/Housekeeper/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/borexola/Housekeeper/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/borexola/Housekeeper/releases/tag/v0.1.0

@@ -367,14 +367,20 @@ public class ScannerLifecycleTests : StoreFixture
         Assert.Equal(0, dip.Resolved);
         Assert.Equal(AnomalyStatus.Open, (await Store.GetAnomalyAsync(open.Id, CancellationToken.None))!.Status);
 
-        // Back out again: the same card, not a new one.
-        Clock.Advance(TimeSpan.FromMinutes(5));
-        _ha.Entities[0] = plug with { State = "160", LastChanged = Clock.GetUtcNow() };
-        var again = await scanner.ScanAsync(CancellationToken.None);
-        Assert.Equal(0, again.Raised);
+        // Back out again, and long enough to re-qualify: the excursion is dated from after the dip, so the
+        // detector really does fire, and it refreshes the card that is already there rather than opening a
+        // second one. Asserting on the refreshed sentence is what tells those two apart.
+        for (var i = 0; i < 3; i++)
+        {
+            Clock.Advance(TimeSpan.FromMinutes(5));
+            _ha.Entities[0] = plug with { State = "160", LastChanged = Clock.GetUtcNow() };
+            await scanner.ScanAsync(CancellationToken.None);
+        }
+
         var same = Assert.Single(await Store.ListAnomaliesAsync(AnomalyStatus.Open, 10, false, CancellationToken.None));
         Assert.Equal(open.Id, same.Id);
         Assert.Equal(detected, same.DetectedUtc);
+        Assert.Contains("and has for 10 minutes", same.Summary);
 
         // Back inside for good: closed once it has stayed there for the wait, not on the first reading.
         var closedOn = -1;
@@ -525,7 +531,7 @@ public class ScannerLifecycleTests : StoreFixture
         options.Scan.MaxTrackedEntities = 3;
         options.Scan.BackfillFromRecorder = false;
 
-        // Two lights, the sun, and a hundred sensors that sort before every one of them.
+        // Two lights, the sun, and a hundred automations that sort before every one of them.
         _ha.Entities.Add(Build.Entity("light.zz_hall", "off", now));
         _ha.Entities.Add(Build.Entity("light.zz_porch", "off", now));
         _ha.Entities.Add(Build.Entity(Habits.Sun, "above_horizon", now));
@@ -647,11 +653,12 @@ public class TimeZoneReadTests
     {
         public List<string> Requests { get; } = [];
         public Func<HttpRequestMessage, Task<string>> Body { get; set; } = _ => Task.FromResult("{}");
+        public HttpStatusCode Status { get; set; } = HttpStatusCode.OK;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Requests.Add($"{request.Method} {request.RequestUri!.AbsolutePath}");
-            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(await Body(request), Encoding.UTF8, "application/json") };
+            return new HttpResponseMessage(Status) { Content = new StringContent(await Body(request), Encoding.UTF8, "application/json") };
         }
     }
 
@@ -695,6 +702,21 @@ public class TimeZoneReadTests
         settings.Current.HomeAssistant.BaseUrl = "http://other.test:8123";
         handler.Body = _ => Task.FromResult("""{"time_zone":"Pacific/Auckland"}""");
         Assert.Equal("Pacific/Auckland", await client.GetTimeZoneAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task A_config_that_answers_with_an_error_yields_null_and_is_not_held()
+    {
+        var (client, handler, _, _) = Make();
+        handler.Status = HttpStatusCode.BadGateway;
+        handler.Body = _ => Task.FromResult("""{"time_zone":"America/Regina"}""");
+
+        Assert.Null(await client.GetTimeZoneAsync(CancellationToken.None));
+
+        // Not cached: the very next call asks again and takes the good answer.
+        handler.Status = HttpStatusCode.OK;
+        Assert.Equal("America/Regina", await client.GetTimeZoneAsync(CancellationToken.None));
+        Assert.Equal(2, handler.Requests.Count(request => request == "GET /api/config"));
     }
 
     [Theory]
@@ -823,5 +845,134 @@ public class RoutineApiTests
         Assert.Equal(JsonValueKind.Null, read.GetProperty("note").ValueKind);
 
         await _client.DeleteAsync($"/api/concerns/{added.GetProperty("id").GetInt64()}");
+    }
+}
+
+/// <summary>
+/// The rules that only show themselves at scale or through the client: the cap on how many routines are
+/// offered at once, and an automation that names an area or a device rather than entities.
+/// </summary>
+public class OfferCapTests : StoreFixture
+{
+    private readonly FakeHomeAssistant _ha = new();
+
+    private AnomalyScanner Scanner(HousekeeperOptions options) =>
+        new(_ha, Store, new FakeSettings(options), Clock, NullLogger<AnomalyScanner>.Instance);
+
+    /// <summary>Sixteen rooms, each with a light that follows its own motion sensor every evening and goes off at ten.</summary>
+    private async Task<HousekeeperOptions> SeedRoomsAsync(int rooms)
+    {
+        var now = Clock.GetUtcNow();
+        var start = new DateTimeOffset(now.Year, now.Month, now.Day, 0, 0, 0, TimeSpan.Zero).AddDays(-9);
+
+        var options = new HousekeeperOptions();
+        options.Scan.IncludeAll = false;
+        options.Scan.BackfillFromRecorder = false;
+        options.Scan.Include = ["light.*", "binary_sensor.*"];
+
+        List<(string EntityId, StateSample Sample)> samples = [];
+        void Add(string id, DateTimeOffset at, string state) => samples.Add((id, new StateSample(state, null, at)));
+
+        for (var room = 0; room < rooms; room++)
+        {
+            var light = $"light.room_{room:00}";
+            var motion = $"binary_sensor.room_{room:00}_motion";
+            _ha.Entities.Add(Build.Entity(light, "off", now.AddHours(-14), friendlyName: $"Room {room} light", area: $"Room {room}"));
+            _ha.Entities.Add(Build.Entity(motion, "off", now.AddHours(-1), friendlyName: $"Room {room} motion", deviceClass: "motion", area: $"Room {room}"));
+
+            Add(light, start, "off");
+            Add(motion, start, "off");
+            for (var day = 0; day < 9; day++)
+            {
+                var d = start.AddDays(day);
+                Add(motion, d.AddHours(19), "on");
+                Add(light, d.AddHours(19).AddSeconds(20 + room), "on");
+                Add(motion, d.AddHours(19).AddMinutes(5), "off");
+                Add(light, d.AddHours(22).AddMinutes((day % 2 == 0 ? -2 : 2) + room), "off");
+            }
+        }
+
+        await Store.AddSamplesAsync(samples, CancellationToken.None);
+        return options;
+    }
+
+    [Fact]
+    public async Task More_routines_than_the_cap_are_offered_up_to_it_and_the_rest_are_left_alone()
+    {
+        var options = await SeedRoomsAsync(16);
+        var scanner = Scanner(options);
+
+        await scanner.ScanAsync(CancellationToken.None);
+
+        var search = scanner.LastRoutineSearch!;
+        Assert.True(search.Found > Habits.MostOffered, $"only {search.Found} routines held up");
+        Assert.Equal(Habits.MostOffered, search.Offered);
+
+        var open = await Store.ListAnomaliesAsync(AnomalyStatus.Open, 200, false, CancellationToken.None);
+        Assert.Equal(Habits.MostOffered, open.Count(finding => finding.Kind == AnomalyKind.Habit));
+
+        // Nothing that held up was closed for not holding up: the ones past the cap are simply not shown.
+        Assert.Empty((await Store.ListAnomaliesAsync(AnomalyStatus.Resolved, 200, true, CancellationToken.None))
+            .Where(finding => finding.Kind == AnomalyKind.Habit));
+
+        // Put one away and the next one takes its place, rather than the slot staying spent for ever.
+        var offered = open.First(finding => finding.Kind == AnomalyKind.Habit);
+        await Store.UpdateAnomalyAsync(
+            offered with { Status = AnomalyStatus.Dismissed, DecidedUtc = Clock.GetUtcNow(), Dismissals = 1 },
+            CancellationToken.None);
+
+        Clock.Advance(TimeSpan.FromMinutes(61));
+        await scanner.ScanAsync(CancellationToken.None);
+
+        var after = await Store.ListAnomaliesAsync(AnomalyStatus.Open, 200, false, CancellationToken.None);
+        Assert.Equal(Habits.MostOffered, after.Count(finding => finding.Kind == AnomalyKind.Habit));
+        Assert.DoesNotContain(after, finding => finding.DedupKey == offered.DedupKey);
+    }
+}
+
+public class AutomationReachTests
+{
+    private sealed class StubHandler : HttpMessageHandler
+    {
+        public Func<HttpRequestMessage, Task<string>> Body { get; set; } = _ => Task.FromResult("{}");
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            new(HttpStatusCode.OK) { Content = new StringContent(await Body(request), Encoding.UTF8, "application/json") };
+    }
+
+    [Fact]
+    public async Task An_automation_that_targets_an_area_or_a_device_covers_the_entities_in_them()
+    {
+        var handler = new StubHandler
+        {
+            Body = _ => Task.FromResult("""
+                {"alias":"Editor built","triggers":[{"trigger":"device","device_id":"dev1","domain":"binary_sensor","type":"motion"}],
+                 "actions":[{"action":"light.turn_off","target":{"area_id":"living_room"}}]}
+                """),
+        };
+
+        var settings = new FakeSettings();
+        settings.Current.HomeAssistant.BaseUrl = "http://ha.test:8123";
+        var secrets = new SecretStore(Path.Combine(Path.GetTempPath(), $"hs-reach-{Guid.NewGuid():N}.json"), NullLogger<SecretStore>.Instance);
+        var client = new HomeAssistantClient(
+            new HttpClient(handler), settings, secrets,
+            new Microsoft.Extensions.Time.Testing.FakeTimeProvider(new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero)),
+            NullLogger<HomeAssistantClient>.Instance);
+
+        List<HaEntity> entities =
+        [
+            Build.Entity("automation.built", "on", automationConfigId: "1"),
+            // The area was renamed after it was created, so only its registry id matches.
+            Build.Entity("light.lamp", "off", area: "Master living room", areaId: "living_room"),
+            Build.Entity("binary_sensor.hall_motion", "off", deviceId: "dev1", deviceClass: "motion"),
+            Build.Entity("light.elsewhere", "off", area: "Study", areaId: "study"),
+        ];
+
+        var automations = await client.GetAutomationsAsync(entities, CancellationToken.None);
+
+        var reach = Assert.Single(automations).Entities;
+        Assert.Contains("light.lamp", reach);
+        Assert.Contains("binary_sensor.hall_motion", reach);
+        Assert.DoesNotContain("light.elsewhere", reach);
     }
 }
