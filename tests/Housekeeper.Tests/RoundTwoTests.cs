@@ -912,8 +912,9 @@ public class OfferCapTests : StoreFixture
         Assert.Equal(Habits.MostOffered, open.Count(finding => finding.Kind == AnomalyKind.Habit));
 
         // Nothing that held up was closed for not holding up: the ones past the cap are simply not shown.
-        Assert.Empty((await Store.ListAnomaliesAsync(AnomalyStatus.Resolved, 200, true, CancellationToken.None))
-            .Where(finding => finding.Kind == AnomalyKind.Habit));
+        Assert.DoesNotContain(
+            await Store.ListAnomaliesAsync(AnomalyStatus.Resolved, 200, true, CancellationToken.None),
+            finding => finding.Kind == AnomalyKind.Habit);
 
         // Put one away and the next one takes its place, rather than the slot staying spent for ever.
         var offered = open.First(finding => finding.Kind == AnomalyKind.Habit);
