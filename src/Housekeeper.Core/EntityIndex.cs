@@ -137,12 +137,40 @@ public static class EntityIndex
     /// <summary>Applies the observe/ignore globs from <see cref="ScanOptions"/>.</summary>
     public static IReadOnlyList<HaEntity> Filter(IEnumerable<HaEntity> entities, ScanOptions options)
     {
+        // The sun is one entity with two changes a day, and it is what tells "after dark" from "at noon"
+        // for every routine and every concern. It is watched whenever Home Assistant reports it, whatever the
+        // include list says, unless the user excluded it by name.
         var included = entities.Where(e =>
-            (options.IncludeAll || options.Include.Any(p => GlobMatch(p, e.EntityId))) &&
+            (options.IncludeAll || e.EntityId == Habits.Sun || options.Include.Any(p => GlobMatch(p, e.EntityId))) &&
             !options.Exclude.Any(p => GlobMatch(p, e.EntityId)));
 
-        return [.. included.OrderBy(e => e.EntityId, StringComparer.Ordinal).Take(options.MaxTrackedEntities)];
+        // When the cap binds, what is kept decides what the house can notice. Taken in id order, a
+        // 3,400-entity house filled its 500 slots with automation.*, binary_sensor.* and button.* and never
+        // recorded a light, a lock, a person or the sun -- so nothing could ever be learned about how the
+        // house is used. Order by what a reading can be about first, and by id within that, so the result
+        // is still stable from one scan to the next.
+        return [.. included
+            .OrderBy(Priority)
+            .ThenBy(e => e.EntityId, StringComparer.Ordinal)
+            .Take(options.MaxTrackedEntities)];
     }
+
+    /// <summary>Where an entity sits in the queue for a watch-list slot: the sun, then things a routine is made of, then readings, then plumbing.</summary>
+    internal static int Priority(HaEntity entity)
+    {
+        if (entity.EntityId == Habits.Sun) return 0;
+        if (Habits.IsRoutineMaterial(entity)) return 1;
+        if (PlumbingDomains.Contains(entity.Domain) || Baselines.IsInert(entity)) return 3;
+        return 2;
+    }
+
+    /// <summary>Domains that are Home Assistant's own machinery or a device's settings, not the house doing anything.</summary>
+    private static readonly HashSet<string> PlumbingDomains = new(StringComparer.Ordinal)
+    {
+        "automation", "script", "scene", "button", "input_button", "number", "select", "text", "time", "date",
+        "datetime", "input_number", "input_select", "input_text", "input_datetime", "zone", "counter", "timer",
+        "schedule", "update", "event", "image", "tts", "stt", "conversation", "persistent_notification",
+    };
 
     /// <summary>
     /// Domains worth offering when the wording matched little or nothing, most commonly automated first.

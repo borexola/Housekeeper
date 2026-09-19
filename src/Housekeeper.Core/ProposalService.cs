@@ -127,7 +127,7 @@ public sealed class ProposalService(
 
             if (raw is null)
                 return await FailAsync(request, source, anomalyId, parent, feedback, now,
-                    $"The {llm.Name} endpoint did not answer. Check that it is running and the model is pulled.",
+                    $"The model did not answer ({llm.Name}). Check that it is running and the model is pulled.",
                     cancellationToken).ConfigureAwait(false);
 
             var parsed = AutomationDrafting.Parse(raw, known, services);

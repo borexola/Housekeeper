@@ -9,6 +9,7 @@ namespace Housekeeper.Api;
 /// </summary>
 public sealed class ScanWorker(
     AnomalyScanner scanner,
+    ConcernService concerns,
     ISettingsProvider settings,
     TimeProvider clock,
     ILogger<ScanWorker> logger) : BackgroundService
@@ -69,6 +70,23 @@ public sealed class ScanWorker(
 
             // Published before the wait, so the dashboard counts down to the tick that is really coming.
             scanner.NextUtc = scan.Enabled ? clock.GetUtcNow() + interval : null;
+
+            // A concern added while the model was down, or before one was chosen, is read the moment it can
+            // be. On the scan's tick whether or not scanning is on, because the concern is the user's ask
+            // and the model coming back is the whole of what it is waiting for.
+            try
+            {
+                if (await concerns.ReadPendingAsync(stoppingToken).ConfigureAwait(false) > 0)
+                    logger.LogInformation("Read a concern the model had not yet had its say on.");
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not read a pending concern; it will be tried again next tick.");
+            }
 
             if (!scan.Enabled) continue;
 

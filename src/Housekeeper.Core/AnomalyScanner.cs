@@ -10,6 +10,7 @@ namespace Housekeeper.Core;
 /// the same history the detectors just read, so it can never disagree with what they were able to do.
 /// </param>
 /// <param name="Backfilled">Samples read from Home Assistant's recorder for entities seen for the first time.</param>
+/// <param name="Routines">Routines newly offered by this scan's search of the history, counted apart from findings because they are offers, not problems.</param>
 public sealed record ScanReport(
     int Observed,
     int NewSamples,
@@ -18,7 +19,8 @@ public sealed record ScanReport(
     int Visible = 0,
     int Resolved = 0,
     int Judged = 0,
-    int Backfilled = 0);
+    int Backfilled = 0,
+    int Routines = 0);
 
 /// <summary>The outcome of the most recent scan, kept so the dashboard can say what happened and when.</summary>
 public sealed record ScanState(DateTimeOffset FinishedUtc, TimeSpan Took, ScanReport? Report, string? Error);
@@ -92,6 +94,34 @@ public sealed class AnomalyScanner(
     private readonly HashSet<string> _backfilled = new(StringComparer.Ordinal);
 
     private readonly SemaphoreSlim _gate = new(1, 1);
+
+    /// <summary>
+    /// How often the stored history is searched for routines. A routine is weeks of transitions, so nothing
+    /// about it changes between one minute and the next, and the search reads far more than a scan does.
+    /// </summary>
+    private static readonly TimeSpan HabitCadence = TimeSpan.FromHours(1);
+
+    /// <summary>The most transitions of one entity the routine search reads: two months of a light switched forty times a day.</summary>
+    private const int HabitSamplesPerEntity = 6000;
+
+    private DateTimeOffset? _habitsAt;
+
+    /// <summary>
+    /// Whether any scan this process has seen the automation integration in the state list. A later scan
+    /// that sees none is Home Assistant mid-restart, not a house that deleted every automation.
+    /// </summary>
+    private bool _sawAutomations;
+
+    /// <summary>The last search for routines: when, over how much, and what came of it. Null until one has run.</summary>
+    public HabitSearch? LastRoutineSearch { get; private set; }
+
+    /// <summary>How many dismissals silence a finding for good.</summary>
+    public const int DismissalsToSilence = 3;
+
+    /// <summary>The house's time zone, asked of Home Assistant now and then rather than on every pass.</summary>
+    private (TimeZoneInfo Zone, DateTimeOffset At)? _zone;
+
+    private static readonly TimeSpan ZoneFreshFor = TimeSpan.FromHours(6);
 
     /// <summary>What the last scan did. Null until one has run.</summary>
     public ScanState? Last { get; private set; }
@@ -230,6 +260,11 @@ public sealed class AnomalyScanner(
         HashSet<(string EntityId, AnomalyKind Kind)> resolvable = [];
         var judged = 0;
 
+        // Entities whose readings could be judged this scan, whatever they read. A numeric finding on one of
+        // these is closed only on positive evidence that the reading came back; on the others, a newer
+        // reading the detector cannot judge is all the card can be measured against.
+        HashSet<string> numericJudgeable = new(StringComparer.Ordinal);
+
         var backfilled = 0;
 
         if (watched.Count > 0)
@@ -262,6 +297,7 @@ public sealed class AnomalyScanner(
                 var bar = concern is null ? scan : sharpened;
 
                 if (AnomalyDetection.CanJudge(entity, history, bar, now)) judged++;
+                if (AnomalyDetection.NumericJudgeable(entity, history, bar)) numericJudgeable.Add(entity.EntityId);
                 foreach (var kind in AnomalyDetection.Resolvable(entity, history, bar, now))
                     resolvable.Add((entity.EntityId, kind));
 
@@ -285,7 +321,9 @@ public sealed class AnomalyScanner(
             }
         }
 
-        var resolved = await ResolveAsync(open, standing, resolvable, absorbed, watched, entities, concerns, now, cancellationToken)
+        var habits = await LearnHabitsAsync(entities, watched, scan, standing, now, cancellationToken).ConfigureAwait(false);
+
+        var resolved = await ResolveAsync(open, standing, resolvable, numericJudgeable, absorbed, watched, entities, concerns, habits, now, cancellationToken)
             .ConfigureAwait(false);
 
         // Pruning happens whatever is being watched. Narrowing the watch list used to leave the samples of
@@ -303,11 +341,11 @@ public sealed class AnomalyScanner(
             .ConfigureAwait(false);
 
         logger.LogInformation(
-            "Scan observed {Observed} entities, stored {NewSamples} new samples and {Backfilled} from the recorder, raised {Raised} anomalies, " +
-            "closed {Resolved} that had passed, pruned {Pruned} rows, expired {Expired} proposals and {Forgotten} findings.",
-            watched.Count, inserted, backfilled, raised, resolved, pruned, expired, forgotten);
+            "Scan observed {Observed} entities, stored {NewSamples} new samples and {Backfilled} from the recorder, raised {Raised} anomalies " +
+            "and offered {Routines} routines, closed {Resolved} that had passed, pruned {Pruned} rows, expired {Expired} proposals and {Forgotten} findings.",
+            watched.Count, inserted, backfilled, raised, habits.Raised, resolved, pruned, expired, forgotten);
 
-        return new ScanReport(watched.Count, inserted, raised, pruned, entities.Count, resolved, judged, backfilled);
+        return new ScanReport(watched.Count, inserted, raised, pruned, entities.Count, resolved, judged, backfilled, habits.Raised);
     }
 
     private static TimeSpan Longest(TimeSpan left, TimeSpan right) => left > right ? left : right;
@@ -557,10 +595,12 @@ public sealed class AnomalyScanner(
         IReadOnlyList<Anomaly> open,
         IReadOnlySet<string> standing,
         IReadOnlySet<(string EntityId, AnomalyKind Kind)> resolvable,
+        IReadOnlySet<string> numericJudgeable,
         IReadOnlyDictionary<string, string> absorbed,
         IReadOnlyList<HaEntity> watched,
         IReadOnlyList<HaEntity> visible,
         IReadOnlyList<Concern> concerns,
+        HabitPass habits,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -594,6 +634,24 @@ public sealed class AnomalyScanner(
             // A missing-entity finding is about an automation, not an entity, so it turns on whether the
             // automations could be checked at all this scan.
             if (finding.Kind == AnomalyKind.MissingEntity) return seen.Count > 0 ? "" : null;
+
+            // A routine is derived from weeks of history, not from this minute's state, and only every so
+            // often. On a scan that did not look, nothing new is known about it and it stays. When one did
+            // look and no longer offers it, it is over: an automation now does it, which is the happy
+            // ending, or the pattern did not hold up.
+            if (finding.Kind == AnomalyKind.Habit)
+            {
+                if (!habits.Mined) return null;
+                if (habits.Off is { } off) return off;
+                if (habits.Automated.Contains(finding.DedupKey)) return "An automation now does this.";
+
+                // The search only looks at watched entities. A routine whose effect or cue has left the
+                // watch list was not looked at, and "not held up" would be a false statement about the user.
+                if (LeftWatchList(finding.EntityId) || (CueOf(finding.EvidenceJson) is { } cue && LeftWatchList(cue)))
+                    return "It is no longer on the watch list.";
+
+                return "It has not held up over the weeks since.";
+            }
 
             if (absorbed.TryGetValue(finding.DedupKey, out var lead))
                 return $"It is now covered by the finding for {lead}.";
@@ -647,10 +705,11 @@ public sealed class AnomalyScanner(
                 case AnomalyKind.Unavailable when !entity.IsUnavailable:
                     return "";
 
-                // The sensor has reported since. Had the detector been able to judge the newer reading and
-                // let it pass, Resolvable would have closed this above; reaching here means it could not
-                // judge, and the card is quoting a value the sensor no longer shows.
-                case AnomalyKind.NumericOutlier when entity.Numeric is not null && entity.LastChanged > finding.DetectedUtc:
+                // The sensor has reported since and its readings cannot be judged any more: the card is
+                // quoting a value the sensor no longer shows, and nothing could ever close it. While the
+                // readings CAN be judged, a newer reading closes nothing on its own; it has to have come back
+                // inside the range and stayed there, which Resolvable decides above.
+                case AnomalyKind.NumericOutlier when !numericJudgeable.Contains(finding.EntityId) && entity.Numeric is not null && entity.LastChanged > finding.DetectedUtc:
                     return "It has reported since, and there is not yet enough history to judge the newer reading.";
 
                 default:
@@ -665,6 +724,24 @@ public sealed class AnomalyScanner(
             return parts.Length >= 3 && parts[0] == "concern" && long.TryParse(parts[1], out id);
         }
 
+        // Home Assistant still reports it, but this scan did not look at it.
+        bool LeftWatchList(string entityId) => !observed.ContainsKey(entityId) && seen.Contains(entityId);
+
+        static string? CueOf(string evidenceJson)
+        {
+            try
+            {
+                return System.Text.Json.Nodes.JsonNode.Parse(evidenceJson) is System.Text.Json.Nodes.JsonObject json &&
+                       json["cue"] is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<string>(out var cue)
+                    ? cue
+                    : null;
+            }
+            catch (System.Text.Json.JsonException)
+            {
+                return null;
+            }
+        }
+
         static string? Excused(AnomalyKind kind, HaEntity entity) => kind switch
         {
             AnomalyKind.StuckState => Baselines.DiagnosticReason(entity),
@@ -672,6 +749,166 @@ public sealed class AnomalyScanner(
             AnomalyKind.Unavailable => Baselines.IsInert(entity) ? $"the {entity.Domain} domain has no state that can go wrong" : null,
             _ => null,
         };
+    }
+
+    /// <summary>What one scan's search for routines did, for the closing pass.</summary>
+    /// <param name="Mined">Whether the history was searched this scan at all.</param>
+    /// <param name="Off">When learning is switched off: the reason every open routine is closed with.</param>
+    /// <param name="Automated">Routines that held up but an existing automation already performs.</param>
+    /// <param name="Raised">Routines newly offered.</param>
+    internal sealed record HabitPass(bool Mined, string? Off, IReadOnlySet<string> Automated, int Raised)
+    {
+        public static readonly HabitPass Skipped = new(false, null, new HashSet<string>(StringComparer.Ordinal), 0);
+    }
+
+    /// <summary>The last search for routines, for the dashboard: when, over how many entities, and what came of it.</summary>
+    /// <param name="Found">Routines that held up, shown or not.</param>
+    /// <param name="Offered">Routines on offer after the cap and the user's own put-aways.</param>
+    /// <param name="Skipped">Why the search did not run, when it did not; null when it ran.</param>
+    public sealed record HabitSearch(DateTimeOffset AtUtc, int Entities, int Found, int Offered, int Automated, int MachineMade, string? Skipped);
+
+    /// <summary>
+    /// Whether a finding is far enough past its bar to come back after being dismissed before. Each
+    /// dismissal raises the bar by half a doubling; after <see cref="DismissalsToSilence"/> the answer is final.
+    /// </summary>
+    internal static bool ClearsTheDismissals(Anomaly anomaly, Anomaly existing) =>
+        existing.Dismissals < DismissalsToSilence && anomaly.Severity >= 1 + 0.5 * existing.Dismissals;
+
+    /// <summary>
+    /// Searches the stored history for routines, once an hour, and raises each as a finding of its own kind.
+    ///
+    /// The existing automations are read first, because a routine one of them already performs would
+    /// otherwise be offered as new -- and if they cannot be read, or Home Assistant is between restarts and
+    /// lists none, the search waits for the next hour rather than guessing. The house's time zone comes
+    /// from Home Assistant: "about a quarter to seven" is a local time, and the container this runs in is
+    /// pinned to UTC.
+    ///
+    /// Everything that held up stands, whether or not it is shown, so a routine past the cap is never closed
+    /// as "not held up". The cap is applied here rather than in the search, where what the user has already
+    /// put away is known: a put-away routine keeps its row current but takes no slot, so the thirty-first
+    /// routine is offered once the thirtieth is put away rather than never.
+    /// </summary>
+    private async Task<HabitPass> LearnHabitsAsync(
+        IReadOnlyList<HaEntity> entities,
+        IReadOnlyList<HaEntity> watched,
+        ScanOptions scan,
+        HashSet<string> standing,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (!scan.LearnHabits)
+        {
+            LastRoutineSearch = new HabitSearch(now, 0, 0, 0, 0, 0, "Learning routines is turned off.");
+            return new HabitPass(true, "Learning routines is turned off under Settings → Scan.", new HashSet<string>(StringComparer.Ordinal), 0);
+        }
+
+        if (_habitsAt is { } at && now - at < HabitCadence) return HabitPass.Skipped;
+        if (watched.Count == 0) return HabitPass.Skipped;
+
+        var hasAutomations = entities.Any(entity => entity.Domain == "automation");
+        if (hasAutomations) _sawAutomations = true;
+        else if (_sawAutomations)
+        {
+            _habitsAt = now;
+            LastRoutineSearch = new HabitSearch(now, 0, 0, 0, 0, 0, "Home Assistant listed no automations this scan; waiting for them to come back.");
+            logger.LogWarning("The state list holds no automations this scan, so routines were not looked for this hour.");
+            return HabitPass.Skipped;
+        }
+
+        IReadOnlyList<ExistingAutomation> automations;
+        try
+        {
+            automations = await homeAssistant.GetAutomationsAsync(entities, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _habitsAt = now;
+            LastRoutineSearch = new HabitSearch(now, 0, 0, 0, 0, 0, "The existing automations could not be read: " + ex.Message);
+            logger.LogWarning(ex, "Could not read the existing automations, so routines were not looked for this hour.");
+            return HabitPass.Skipped;
+        }
+
+        var wanted = Habits.Candidates(watched);
+        var samples = await store.GetSamplesForAsync(wanted, now - scan.History, HabitSamplesPerEntity, cancellationToken).ConfigureAwait(false);
+        var zone = await ZoneAsync(now, cancellationToken).ConfigureAwait(false);
+
+        var report = Habits.Find(watched, samples, automations, zone, scan, now);
+        _habitsAt = now;
+
+        foreach (var habit in report.Found) standing.Add(habit.DedupKey);
+
+        int raised = 0, offered = 0;
+        foreach (var habit in report.Found)
+        {
+            var existing = await store.FindAnomalyAsync(habit.DedupKey, cancellationToken).ConfigureAwait(false);
+
+            // Put away or promoted: the sentence is kept current, no slot is taken.
+            if (existing is { Status: AnomalyStatus.Dismissed or AnomalyStatus.Promoted })
+            {
+                await TryRaiseAsync(habit, scan, now, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (existing is { Status: AnomalyStatus.Open })
+            {
+                offered++;
+                await TryRaiseAsync(habit, scan, now, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (offered >= Habits.MostOffered) continue;
+
+            offered++;
+            if (await TryRaiseAsync(habit, scan, now, cancellationToken).ConfigureAwait(false)) raised++;
+        }
+
+        // A routine the user turned into an automation is done with, not still on offer.
+        foreach (var key in report.Automated)
+        {
+            var existing = await store.FindAnomalyAsync(key, cancellationToken).ConfigureAwait(false);
+            if (existing is not { Kind: AnomalyKind.Habit, Status: AnomalyStatus.Promoted }) continue;
+
+            await store.UpdateAnomalyAsync(
+                existing with { Status = AnomalyStatus.Resolved, DecidedUtc = now, EvidenceJson = WithReason(existing.EvidenceJson, "An automation now does this.") },
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        LastRoutineSearch = new HabitSearch(now, wanted.Count, report.Found.Count, offered, report.Automated.Count, report.MachineMade.Count, null);
+
+        logger.LogInformation(
+            "Looked for routines across {Entities} entities: {Found} held up, {Offered} on offer ({Raised} new), {Automated} already automated, {MachineMade} machine-made.",
+            wanted.Count, report.Found.Count, offered, raised, report.Automated.Count, report.MachineMade.Count);
+
+        return new HabitPass(true, null, report.Automated, raised);
+    }
+
+    /// <summary>The house's time zone, or the process's own when Home Assistant's cannot be read or resolved.</summary>
+    internal async Task<TimeZoneInfo> ZoneAsync(DateTimeOffset now, CancellationToken cancellationToken)
+    {
+        if (_zone is { } held && now - held.At < ZoneFreshFor) return held.Zone;
+
+        var zone = TimeZoneInfo.Local;
+        var resolved = false;
+        try
+        {
+            var id = await homeAssistant.GetTimeZoneAsync(cancellationToken).ConfigureAwait(false);
+            if (!string.IsNullOrWhiteSpace(id))
+            {
+                zone = TimeZoneInfo.FindSystemTimeZoneById(id.Trim());
+                resolved = true;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogDebug(ex, "Could not resolve Home Assistant's time zone; using the process's own.");
+        }
+
+        // Only an answer is held. Falling back is tried again next pass, so an outage costs one search in
+        // the wrong zone rather than six hours of them.
+        if (resolved) _zone = (zone, now);
+        else _zone = null;
+
+        return zone;
     }
 
     /// <summary>Flags automations we created that now reference entities Home Assistant no longer has.</summary>
@@ -858,8 +1095,14 @@ public sealed class AnomalyScanner(
 
             // A finding that closed itself was never silenced by anyone, so a fresh occurrence of it opens
             // again at once rather than waiting out a window meant for something the user chose to dismiss.
+            //
+            // A dismissal is the user teaching the detector. Each one raises the bar the same finding has
+            // to clear to come back after the quiet period -- half a doubling per dismissal -- and after
+            // three the answer is taken as final. A routine the user said no to is final from the first:
+            // "not this one" is a decision about the routine, not about that week, and its row is never
+            // pruned, so it stays quiet for good.
             case AnomalyStatus.Resolved:
-            case AnomalyStatus.Dismissed when now - (existing.DecidedUtc ?? existing.DetectedUtc) >= scan.RedetectAfter:
+            case AnomalyStatus.Dismissed when existing.Kind != AnomalyKind.Habit && now - (existing.DecidedUtc ?? existing.DetectedUtc) >= scan.RedetectAfter && ClearsTheDismissals(anomaly, existing):
 
             // Promoting is a decision with a window, like dismissing -- not a permanent silence. It used to
             // be neither: Promoted fell through to the default below, and nothing else moved the row either,
@@ -871,7 +1114,9 @@ public sealed class AnomalyScanner(
                     {
                         Status = AnomalyStatus.Open,
                         Summary = anomaly.Summary,
-                        EvidenceJson = anomaly.EvidenceJson,
+                        EvidenceJson = existing.Dismissals > 0
+                            ? WithValue(anomaly.EvidenceJson, "dismissed_before", System.Text.Json.Nodes.JsonValue.Create(existing.Dismissals))
+                            : anomaly.EvidenceJson,
                         SuggestedRequest = anomaly.SuggestedRequest,
                         Severity = anomaly.Severity,
                         DetectedUtc = now,

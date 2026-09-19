@@ -54,6 +54,7 @@ internal static class Ui
     --kind-quiet: #0f8b8d;
     --kind-missing: #c02626;
     --kind-concern: #e0632a;
+    --kind-habit: #2f855a;
 
     --meter-fill: #2f5bd7;
     --meter-track: #dfe4ec;
@@ -94,6 +95,7 @@ internal static class Ui
       --kind-quiet: #5eead4;
       --kind-missing: #f87171;
       --kind-concern: #f8935f;
+      --kind-habit: #6ee7b7;
 
       --meter-fill: #7c9cf5;
       --meter-track: #262c38;
@@ -177,6 +179,7 @@ internal static class Ui
   h3.kind.kind-Unavailable::before { background: var(--kind-quiet); }
   h3.kind.kind-MissingEntity::before { background: var(--kind-missing); }
   h3.kind.kind-Concern::before { background: var(--kind-concern); }
+  h3.kind.kind-Habit::before { background: var(--kind-habit); }
   h3.kind:first-child { margin-top: 4px; }
   h3.kind .count { color: var(--muted); }
   p.lead { margin: 0 0 16px; }
@@ -254,6 +257,20 @@ internal static class Ui
     padding: 12px 14px; margin: 10px 0 0; overflow-x: auto;
     font-family: var(--mono); font-size: 12px; line-height: 1.55; color: var(--ink);
   }
+
+  /* A block of text with a copy button in its corner. The button sits over the block's own padding, and
+     the block leaves room on the right so the first line never runs underneath it. */
+  .code { position: relative; margin-top: 10px; }
+  .code pre { padding-right: 84px; margin-top: 0; }
+  .code button.copy {
+    position: absolute; top: 8px; right: 8px;
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; font-size: 12px; font-weight: 400; border-radius: 5px;
+    color: var(--muted); background: var(--panel); border: 1px solid var(--line-soft);
+  }
+  .code button.copy:hover:not(:disabled) { color: var(--ink); border-color: var(--line); }
+  .code button.copy svg { width: 13px; height: 13px; }
+  .code button.copy.done { color: var(--ok-text); }
 
   /* ---- the story: what the automation does, in three rows ---- */
 
@@ -424,5 +441,313 @@ async function navBadge() {
 }
 navBadge();
 setInterval(navBadge, 30000);
+
+// ---- small words, shared by every page ----
+
+/** 1,284 · 12.9K · 4.2M. Compact only once the digits stop being scannable. */
+function compact(n) {
+  if (n === null || n === undefined) return '—';
+  if (n < 10000) return n.toLocaleString();
+  if (n < 1000000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+  return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
+}
+
+/** Says a span of seconds the way the server says one, so the two never disagree. */
+function spoken(seconds) {
+  const s = Math.abs(seconds);
+  if (s < 90) return Math.round(s) + ' seconds';
+  if (s < 5400) return Math.round(s / 60) + ' minutes';
+  if (s < 172800) return (s / 3600).toFixed(1) + ' hours';
+  return (s / 86400).toFixed(1) + ' days';
+}
+
+/** Seconds from now: negative in the past, positive in the future. */
+function fromNow(iso) {
+  return iso ? (new Date(iso).getTime() - Date.now()) / 1000 : null;
+}
+
+/** "just now" · "4 min ago" · "3 h ago" · "yesterday" · "6 d ago", for the corner of a card. */
+function ago(iso) {
+  const s = -fromNow(iso);
+  if (s === null || isNaN(s)) return '';
+  if (s < 45) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + ' min ago';
+  if (s < 86400) return Math.round(s / 3600) + ' h ago';
+  if (s < 172800) return 'yesterday';
+  return Math.round(s / 86400) + ' d ago';
+}
+
+/** Writes a line of feedback into a card, or clears it. */
+function tell(status, message, kind) {
+  if (!status) return;
+  status.textContent = message || '';
+  status.className = kind ? 'status ' + kind : 'status';
+}
+
+let toastTimer = null;
+
+/** A short confirmation at the bottom of the viewport, for actions taken on cards far down the page. */
+function toast(message, kind) {
+  let node = document.getElementById('toast');
+  if (!node) { node = el('div', 'toast'); node.id = 'toast'; document.body.append(node); }
+  node.textContent = message;
+  node.className = 'toast show' + (kind === 'err' ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => node.classList.remove('show'), kind === 'err' ? 8000 : 4500);
+}
+
+/** Seconds of waiting before the count appears, so a quick action does not flash a number. */
+const COUNT_AFTER = 2;
+
+/** And how long before the wait is worth explaining again, for the ones that go to a local model. */
+const PATIENCE_AFTER = 25;
+
+/**
+ * Counts the seconds on a busy button, and says something once the wait gets long.
+ *
+ * A spinner says "working"; it does not say "getting somewhere". Drafting goes to a model that may be a 7B
+ * on someone's CPU, so ten to sixty seconds of an unchanging label is normal — and is indistinguishable
+ * from a wedged request, which is what it was reported as. A number that climbs is the whole difference.
+ *
+ * Returns the function that stops it, which the caller must run however the handler ends.
+ */
+function countUp(button, options, status) {
+  const spinner = el('span', 'spin');
+  const caption = document.createTextNode(options.busy);
+  button.replaceChildren(spinner, caption);
+
+  const started = Date.now();
+  let explained = false;
+
+  const tick = () => {
+    const seconds = Math.round((Date.now() - started) / 1000);
+    caption.textContent = seconds >= COUNT_AFTER ? options.busy + ' ' + seconds + 's' : options.busy;
+
+    if (!explained && status && options.patience && seconds >= PATIENCE_AFTER) {
+      explained = true;
+      tell(status, options.patience);
+    }
+  };
+
+  const timer = setInterval(tick, 500);
+  tick();
+  return () => clearInterval(timer);
+}
+
+/**
+ * A button that disables every button on its card while its handler runs, holds the card against the
+ * background refresh, and then reloads the page's list once, AFTER the hold is released, so the card is
+ * rebuilt from what the action changed rather than left showing its old state with the buttons back on.
+ *
+ * Every button on the same card is disabled, not just the ones beside it: a draft offers Create, Discard
+ * and Refine in two rows, and while any of them is in flight the others are still decisions about the
+ * same draft. Making two of them is how a live automation ended up recorded as superseded with no id.
+ *
+ * Options: status (the card's status line, where an error lands), busy and patience (a running caption
+ * and what to say when the wait gets long), reload (false to skip the reload, when the handler navigates
+ * away), after (run once the reload has happened, with the handler's result -- reveal the new card, say).
+ * The page provides refreshPage(); without one, nothing is reloaded.
+ */
+function action(label, handler, kind, options) {
+  const button = el('button', kind === true ? 'primary' : (kind || null), label);
+  button.type = 'button';
+  const status = options && options.status;
+  button.addEventListener('click', async () => {
+    const scope = button.closest('.card') || button.parentElement;
+    const siblings = scope ? [...scope.querySelectorAll('button')] : [button];
+    const held = siblings.filter((other) => !other.disabled);
+    held.forEach((other) => { other.disabled = true; });
+
+    const release = hold(button.closest('.card'));
+    const stopCounting = options && options.busy ? countUp(button, options, status) : null;
+    let ok = false, result;
+    try {
+      result = await handler();
+      ok = true;
+    } catch (err) {
+      if (status) tell(status, err.message, 'err'); else toast(err.message, 'err');
+    } finally {
+      if (stopCounting) stopCounting();
+      held.forEach((other) => { other.disabled = false; });
+      button.textContent = label;
+
+      const stale = release();
+      const reload = typeof refreshPage === 'function' ? refreshPage : null;
+      if (reload && ok && (!options || options.reload !== false)) {
+        await reload();
+        if (options && options.after) options.after(result);
+      } else if (reload && stale) {
+        reload();
+      }
+    }
+  });
+  return button;
+}
+
+// ---- a block of text with a copy button ----
+
+const COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const COPIED_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+
+/**
+ * Puts text on the clipboard. The clipboard API only exists on a secure page, and Home Assistant over plain
+ * http on the LAN is not one; an embedded browser may also refuse it outright. Either way the old
+ * selection-and-copy route is the fallback, and only if both fail is it reported.
+ */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return; } catch { /* fall through */ }
+  }
+  const scratch = document.createElement('textarea');
+  scratch.value = text;
+  scratch.setAttribute('readonly', '');
+  scratch.style.position = 'fixed';
+  scratch.style.opacity = '0';
+  const previous = document.activeElement;
+  document.body.append(scratch);
+  let ok = false;
+  try {
+    scratch.select();
+    ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+  } finally {
+    // select() took the focus; put it back so a keyboard user keeps their place in the card.
+    scratch.remove();
+    if (previous instanceof HTMLElement && previous !== document.body) {
+      try { previous.focus({ preventScroll: true }); } catch { /* nothing to restore */ }
+    }
+  }
+  if (!ok) throw new Error('The browser refused to copy.');
+}
+
+/** A <pre> of `text` (written with textContent, never markup) with a Copy button in its corner. */
+function codeBlock(text, what) {
+  const box = el('div', 'code');
+  const pre = el('pre', null, text);
+  const button = el('button', 'copy');
+  button.type = 'button';
+  // The title describes; the visible text names the button, so "Copied" is what a screen reader hears.
+  button.title = 'Copy ' + (what || 'to clipboard');
+  const label = el('span', null, 'Copy');
+  label.setAttribute('aria-live', 'polite');
+  const setIcon = (svg) => { button.querySelector('svg')?.remove(); button.insertAdjacentHTML('afterbegin', svg); };
+  setIcon(COPY_ICON);
+  button.append(label);
+
+  let timer = null;
+  button.addEventListener('click', async () => {
+    try {
+      await copyText(text);
+      button.classList.add('done'); setIcon(COPIED_ICON); label.textContent = 'Copied';
+    } catch (err) {
+      label.textContent = 'Could not copy';
+      if (typeof toast === 'function') toast(err.message, 'err');
+    }
+    clearTimeout(timer);
+    timer = setTimeout(() => { button.classList.remove('done'); setIcon(COPY_ICON); label.textContent = 'Copy'; }, 1800);
+  });
+
+  box.append(pre, button);
+  return box;
+}
+
+// ---- keeping a list on screen while it is refreshed underneath ----
+
+const prints = new WeakMap();
+
+/**
+ * Puts a list of cards into `container`, reusing the card the reader already has whenever the item behind it
+ * has not changed. Each entry is { key, print, build, touch }: `key` identifies the item, `print` is a string
+ * that changes when anything worth redrawing changes, `build` makes a new node, and `touch` (optional) is
+ * called on a reused node for the things that drift without the data changing, such as "2 min ago".
+ *
+ * A rebuilt card is a new element, and everything the reader had done to the old one goes with it: the YAML
+ * they had opened, a refinement half typed, the cursor in a box, a button pressed and still working. The
+ * background refresh runs every thirty seconds, so building every card afresh each time meant the page kept
+ * undoing what the reader had just done. Now a card is rebuilt only when its data changed; even then what
+ * was open, typed, or focused is carried across; a card with an action in flight is left alone until the
+ * action finishes; and nodes already in the right place are not moved, so focus and selection survive too.
+ */
+function reconcile(container, entries) {
+  const existing = new Map();
+  for (const node of container.children) if (node.dataset.key) existing.set(node.dataset.key, node);
+
+  const active = document.activeElement;
+  const wanted = [];
+  for (const entry of entries) {
+    const key = String(entry.key);
+    const old = existing.get(key);
+    let node;
+    if (old && old.dataset.busy) {
+      // Rebuilding under a running action would detach the button whose handler is mid-flight. Keep the card
+      // and mark it stale; the action's own completion reloads the list.
+      old.dataset.stale = '1';
+      node = old;
+    } else if (old && prints.get(old) === entry.print) {
+      node = old;
+      if (entry.touch) entry.touch(node);
+    } else {
+      node = entry.build();
+      node.dataset.key = key;
+      prints.set(node, entry.print);
+      if (old) carryOver(old, node);
+    }
+    wanted.push(node);
+  }
+
+  wanted.forEach((node, i) => {
+    if (container.children[i] !== node) container.insertBefore(node, container.children[i] || null);
+  });
+  while (container.children.length > wanted.length) container.lastChild.remove();
+
+  // A node that had to move was blurred by the move. Put the reader back where they were.
+  if (active && active.isConnected && document.activeElement !== active) {
+    try { active.focus({ preventScroll: true }); } catch { /* not focusable any more; fine */ }
+  }
+}
+
+/** Marks a card so the refresh leaves it alone while an action on it runs. Returns a function that clears it. */
+function hold(card) {
+  if (!card) return () => false;
+  card.dataset.busy = '1';
+  return () => {
+    delete card.dataset.busy;
+    const stale = !!card.dataset.stale;
+    delete card.dataset.stale;
+    return stale;
+  };
+}
+
+/**
+ * Copies what the reader had done to a card onto its replacement: which sections were open, what was typed
+ * into which box, and where the cursor was. Elements are matched by position, which holds because a card is
+ * built the same way for the same item.
+ */
+function carryOver(old, fresh) {
+  const pair = (selector) => {
+    const before = old.querySelectorAll(selector);
+    const after = fresh.querySelectorAll(selector);
+    return [...before].map((node, i) => [node, after[i]]).filter(([, b]) => b);
+  };
+
+  for (const [a, b] of pair('details')) b.open = a.open;
+
+  const active = document.activeElement;
+  for (const [a, b] of pair('input:not([type=button]):not([type=submit]), textarea')) {
+    if (a.value && !b.value) b.value = a.value;
+    if (a === active) {
+      const start = a.selectionStart, end = a.selectionEnd;
+      queueMicrotask(() => {
+        try { b.focus({ preventScroll: true }); if (start != null) b.setSelectionRange(start, end); } catch { /* fine */ }
+      });
+    }
+  }
+
+  if (active && old.contains(active) && !/^(INPUT|TEXTAREA)$/.test(active.tagName)) {
+    const focusable = 'button, a[href], summary, [tabindex]';
+    const index = [...old.querySelectorAll(focusable)].indexOf(active);
+    const target = index >= 0 ? fresh.querySelectorAll(focusable)[index] : null;
+    if (target) queueMicrotask(() => { try { target.focus({ preventScroll: true }); } catch { /* fine */ } });
+  }
+}
 """;
 }

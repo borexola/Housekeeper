@@ -29,10 +29,14 @@ public sealed class LlmClient(
         {
             var options = settings.Current.Llm;
             var provider = options.IsOllama ? "Ollama" : options.Provider;
-            var model = !string.IsNullOrWhiteSpace(options.Model) ? options.Model.Trim()
-                : options.IsOllama ? "no model chosen"
-                : "server's loaded model";
-            return $"{provider} ({model})";
+            if (!string.IsNullOrWhiteSpace(options.Model)) return $"{provider}, {options.Model.Trim()}";
+            if (options.IsOllama) return "Ollama, no model chosen";
+
+            // An OpenAI-compatible server with no model named uses whatever it has loaded. Naming the
+            // server is what helps; "server's loaded model" in a sentence read as a product nobody has.
+            return Uri.TryCreate(options.Endpoint, UriKind.Absolute, out var endpoint)
+                ? $"{provider}-compatible server at {endpoint.Host}:{endpoint.Port}"
+                : $"{provider}-compatible server";
         }
     }
 

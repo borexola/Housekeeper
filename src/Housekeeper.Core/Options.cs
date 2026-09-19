@@ -71,6 +71,12 @@ public sealed class HousekeeperOptions
                 + $"kept ({Durations.Format(Scan.History)}), so no numeric reading can ever be judged.");
         if (Scan.MinimumEffect is < 0 or > 10)
             errors.Add("Scan.MinimumEffect must be between 0 and 10, as a fraction — 0.15 is fifteen percent.");
+        if (Scan.MinimumExcursion < TimeSpan.Zero)
+            errors.Add("Scan.MinimumExcursion must be zero or greater.");
+        if (Scan.HabitMinimumTimes < 2)
+            errors.Add("Scan.HabitMinimumTimes must be at least 2.");
+        if (Scan.HabitConfidence is <= 0 or > 1)
+            errors.Add("Scan.HabitConfidence must be above 0 and at most 1, as a fraction — 0.6 is sixty percent.");
         if (Scan.Enabled && Scan.Include.Count == 0 && !Scan.IncludeAll)
             warnings.Add("Scan.Include is empty and Scan.IncludeAll is false, so anomaly scanning will observe nothing.");
 
@@ -314,6 +320,37 @@ public sealed class ScanOptions
 
     /// <summary>A dismissed anomaly stays quiet for this long before it may be raised again.</summary>
     public TimeSpan RedetectAfter { get; set; } = TimeSpan.FromDays(7);
+
+    /// <summary>
+    /// How long a numeric reading has to stay out of its range before it is a finding.
+    ///
+    /// A z-score is a verdict on one reading, and one reading is what a kettle, a microwave, a TV switching
+    /// on or a sensor glitching produces: a spike that is gone by the next scan. Every such spike was a
+    /// card that opened on one scan and closed on the next, and a real house watched its list go from seven
+    /// to three between two refreshes for exactly that reason. Now the reading must have been beyond the bar
+    /// for this long, judged from the stored readings in between, before anyone is told. A sensor that
+    /// reports rarely counts from the moment of its last change, so a thermometer that has read 35 °C for
+    /// half an hour is not made to wait. Zero turns the wait off.
+    /// </summary>
+    public TimeSpan MinimumExcursion { get; set; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>
+    /// Look through the stored history for routines: things the user does by hand, at about the same time
+    /// or right after the same event, often enough that an automation could do them instead. Each one is
+    /// offered on the Noticed page and in the composer's examples, with nothing created until confirmed.
+    /// </summary>
+    public bool LearnHabits { get; set; } = true;
+
+    /// <summary>How many times a routine has to have happened, on at least three different days, before it is offered.</summary>
+    public int HabitMinimumTimes { get; set; } = 5;
+
+    /// <summary>
+    /// How reliably the routine has to hold before it is offered, as a fraction: 0.6 means that in at least
+    /// six cases out of ten, when the cue happened and the thing was not already on, the user turned it on
+    /// within a few minutes. This is the share of the time an automation built from it would be doing what
+    /// the user would have done anyway; below it the automation is guessing.
+    /// </summary>
+    public double HabitConfidence { get; set; } = 0.6;
 }
 
 public sealed class ApiOptions

@@ -201,13 +201,10 @@ public static class AnomalyDetection
             kinds.Add(AnomalyKind.StuckState);
 
         // DetectNumericOutlier: a number, with a baseline of EARLIER readings that is both long enough and
-        // wide enough. Counting the reading itself said a verdict was reachable one sample before it really
-        // was; counting only rows said it was reachable after four hours of a chatty sensor, which is how
-        // "every watched entity has enough history" came to be claimed of a house on its first day.
-        if (entity.Numeric is not null &&
-            !entity.IsCumulative &&
-            Baselines.DiagnosticReason(entity) is null &&
-            Judgeable(NumericBaseline(entity, history.Numeric), options))
+        // wide enough, AND a reading that has come back inside the range and stayed there. Raising waits
+        // for a reading to stay out; closing on the first reading back in was the same flap from the other
+        // side -- a card that vanished on one poll and returned as "noticed just now" on the next.
+        if (NumericJudgeable(entity, history, options) && BackInside(entity, history, options, nowUtc))
             kinds.Add(AnomalyKind.NumericOutlier);
 
         // DetectUnavailable: it is reporting again, and was watched long enough for that to mean something.
@@ -251,7 +248,15 @@ public static class AnomalyDetection
         ScanOptions options,
         DateTimeOffset nowUtc) =>
         Resolvable(entity, history, options, nowUtc).Count > 0 ||
+        NumericJudgeable(entity, history, options) ||
         (entity.IsUnavailable && WatchedLongEnough(Earlier(entity, history.Recent), options, nowUtc));
+
+    /// <summary>Whether this entity's readings can be judged at all: a number, not a total or a diagnostic, with a baseline.</summary>
+    public static bool NumericJudgeable(HaEntity entity, EntityHistory history, ScanOptions options) =>
+        entity.Numeric is not null &&
+        !entity.IsCumulative &&
+        Baselines.DiagnosticReason(entity) is null &&
+        Judgeable(NumericBaseline(entity, history.Numeric), options);
 
     /// <inheritdoc cref="CanJudge(HaEntity, EntityHistory, ScanOptions, DateTimeOffset)"/>
     public static bool CanJudge(
@@ -469,6 +474,94 @@ public static class AnomalyDetection
         // Radio strength, link quality, battery level, device settings: real measurements, no verdicts.
         if (Baselines.DiagnosticReason(entity) is not null) return null;
 
+        if (Normal(entity, history, options) is not { } normal) return null;
+        var (baseline, kind, values, median, spread) = normal;
+        var band = BandOf(entity.LastChanged);
+        var weekend = IsWeekend(entity.LastChanged);
+
+        var move = Math.Abs(current - median);
+        var z = move / spread;
+        if (!double.IsFinite(z) || z < options.OutlierThreshold) return null;
+
+        // A robust z-score can be large while the move itself is invisible — a disk that idles between
+        // 0.00 and 0.02 MB/s scores highly on nothing at all. If the reading and its usual value are the
+        // same number once written down, the finding would read "0 MB/s, well outside its normal range,
+        // usually near 0 MB/s", which is not something to show anyone.
+        if (Ha.Number(current) == Ha.Number(median)) return null;
+
+        // And a move that is real but too small to care about is the same problem one step up: 157.3 to
+        // 158.5 GiB of disk, 3019.5 to 3009 mV of battery. Both cleared four sigma on a baseline that had
+        // simply been very still.
+        //
+        // Deliberately stated here even though Threshold below enforces the same bound structurally -- it
+        // will not place a line nearer to normal than this, so it can never find room for one when the move
+        // itself is smaller. Keeping the rule where a reader looks for it is worth a redundant comparison,
+        // and it settles the common case before sorting the baseline for a quantile.
+        var smallestWorthMentioning = Baselines.MinimumMove(entity, median, current, options.MinimumEffect);
+        if (move < smallestWorthMentioning) return null;
+
+        // Somewhere this entity already goes. A plug that is off most of the time, an HRV on a lower fan
+        // speed, a disk that is idle: the median sits in the busiest mode and every other mode reads as an
+        // excursion for ever.
+        if (Baselines.IsKnownMode(values, current, spread)) return null;
+
+        var above = current > median;
+        if (Threshold(values, median, spread, current, above, smallestWorthMentioning) is not { } limit) return null;
+
+        // And it has to have stayed there. One reading is a kettle, a microwave, a glitch: a card that opens
+        // on this scan and closes on the next, which is worse than no card. The excursion is dated from the
+        // stored readings, so a sensor that reports every few seconds and one that reports twice an hour are
+        // both judged on how long the reading has actually been out, not on how often it says so.
+        var since = ExcursionStart(entity, history, median, Math.Max(options.OutlierThreshold * spread, smallestWorthMentioning), above, options.MinimumExcursion);
+        var excursion = nowUtc - since;
+        if (excursion < options.MinimumExcursion) return null;
+
+        var unit = string.IsNullOrWhiteSpace(entity.Unit) ? "" : " " + entity.Unit;
+        var when = When(kind, band, weekend);
+
+        return new Anomaly
+        {
+            DedupKey = $"outlier:{entity.EntityId}",
+            EntityId = entity.EntityId,
+            Kind = AnomalyKind.NumericOutlier,
+            DetectedUtc = nowUtc,
+            Severity = Times(z, options.OutlierThreshold),
+            Summary =
+                $"Reads {Ha.Number(current)}{unit}, well outside its normal range, and has for {Ha.Duration(excursion)}. " +
+                $"Usually near {Ha.Number(median)}{unit}{when}, judged over {values.Length} readings " +
+                $"spanning {Ha.Duration(Baselines.Span(baseline))}.",
+            SuggestedRequest =
+                $"Notify me when {entity.EntityId} goes {(above ? "above" : "below")} {Ha.Number(limit)}.",
+            EvidenceJson = Evidence(entity, new Dictionary<string, object?>
+            {
+                ["current"] = Round(current),
+                ["unit"] = entity.Unit,
+                ["median"] = Round(median),
+                ["spread"] = Round(spread),
+                ["robust_z"] = Round(z),
+                ["samples"] = values.Length,
+                ["baseline_seconds"] = Math.Round(Baselines.Span(baseline).TotalSeconds),
+                ["baseline"] = Label(kind),
+                ["band_utc"] = BandLabel(band),
+                ["week_part"] = weekend ? "weekend" : "weekday",
+                ["suggested_threshold"] = limit,
+                ["excursion_seconds"] = Math.Round(excursion.TotalSeconds),
+            }),
+        };
+    }
+
+    /// <summary>
+    /// The baseline this entity is judged against right now, and its middle and spread. Null when it cannot
+    /// be judged: not a number, a running total, a diagnostic, too little history, or a ratchet. Shared by
+    /// raising and closing, so the two cannot drift apart.
+    /// </summary>
+    private static (StateSample[] Baseline, BaselineKind Kind, double[] Values, double Median, double Spread)? Normal(
+        HaEntity entity,
+        EntityHistory history,
+        ScanOptions options)
+    {
+        if (entity.Numeric is null || entity.IsCumulative || Baselines.DiagnosticReason(entity) is not null) return null;
+
         var samples = NumericBaseline(entity, history.Numeric);
         if (!Judgeable(samples, options)) return null;
 
@@ -504,66 +597,104 @@ public static class AnomalyDetection
         // judgeable and stops a move too small to see from scoring hugely against a near-zero scale.
         spread = Math.Max(spread, DisplayQuantum);
 
-        var move = Math.Abs(current - median);
-        var z = move / spread;
-        if (!double.IsFinite(z) || z < options.OutlierThreshold) return null;
+        return (baseline, kind, values, median, spread);
+    }
 
-        // A robust z-score can be large while the move itself is invisible — a disk that idles between
-        // 0.00 and 0.02 MB/s scores highly on nothing at all. If the reading and its usual value are the
-        // same number once written down, the finding would read "0 MB/s, well outside its normal range,
-        // usually near 0 MB/s", which is not something to show anyone.
-        if (Ha.Number(current) == Ha.Number(median)) return null;
+    /// <summary>
+    /// The stored readings of this entity up to and including the current one, newest first, from both
+    /// views of its history: the contiguous recent rows, and the thinned rows that reach back weeks.
+    /// </summary>
+    private static List<(DateTimeOffset ChangedUtc, double Value)> ReadingsNewestFirst(HaEntity entity, EntityHistory history) =>
+        [.. history.Recent.Concat(history.Numeric)
+            .Where(sample => sample.ChangedUtc <= entity.LastChanged)
+            .Select(sample => (sample.ChangedUtc, Value: sample.Numeric ?? (Ha.TryNumeric(sample.State, out var v) ? v : (double?)null)))
+            .Where(reading => reading.Value is not null)
+            .Select(reading => (reading.ChangedUtc, reading.Value!.Value))
+            .DistinctBy(reading => reading.ChangedUtc)
+            .OrderByDescending(reading => reading.ChangedUtc)];
 
-        // And a move that is real but too small to care about is the same problem one step up: 157.3 to
-        // 158.5 GiB of disk, 3019.5 to 3009 mV of battery. Both cleared four sigma on a baseline that had
-        // simply been very still.
-        //
-        // Deliberately stated here even though Threshold below enforces the same bound structurally -- it
-        // will not place a line nearer to normal than this, so it can never find room for one when the move
-        // itself is smaller. Keeping the rule where a reader looks for it is worth a redundant comparison,
-        // and it settles the common case before sorting the baseline for a quantile.
-        var smallestWorthMentioning = Baselines.MinimumMove(entity, median, current, options.MinimumEffect);
-        if (move < smallestWorthMentioning) return null;
+    /// <summary>
+    /// When the reading first went beyond the bar and stayed there: the start of the run of stored readings,
+    /// ending at the current one, that are on the current side of normal by at least <paramref name="bar"/>.
+    ///
+    /// The readings are walked newest first, from both views of the history, so an excursion longer than the
+    /// recent window is still dated from its real beginning. A reading back inside the range does not end
+    /// the run on its own -- sensors flicker -- but the run only continues past it when the next reading
+    /// beyond is close in time: within a fifth of the wait. That is what keeps two kettles ten minutes apart,
+    /// with a normal reading between them, from being read as one ten-minute excursion at the density
+    /// numeric history really has, which is one stored reading per scan. A count rule stands as well, so a
+    /// sensor reporting every few seconds cannot carry a run across a long dip of many small readings.
+    /// </summary>
+    internal static DateTimeOffset ExcursionStart(
+        HaEntity entity,
+        EntityHistory history,
+        double median,
+        double bar,
+        bool above,
+        TimeSpan wait)
+    {
+        bool Beyond(double value) => above ? value - median >= bar : median - value >= bar;
+        return RunStart(entity, ReadingsNewestFirst(entity, history), Beyond, wait);
+    }
 
-        // Somewhere this entity already goes. A plug that is off most of the time, an HRV on a lower fan
-        // speed, a disk that is idle: the median sits in the busiest mode and every other mode reads as an
-        // excursion for ever.
-        if (Baselines.IsKnownMode(values, current, spread)) return null;
+    /// <summary>
+    /// The start of the run of readings, ending at the current one, for which <paramref name="holds"/> is
+    /// true, allowing a brief flicker in the middle. See <see cref="ExcursionStart"/> for the rules.
+    /// </summary>
+    private static DateTimeOffset RunStart(
+        HaEntity entity,
+        IReadOnlyList<(DateTimeOffset ChangedUtc, double Value)> newestFirst,
+        Func<double, bool> holds,
+        TimeSpan wait)
+    {
+        var flicker = TimeSpan.FromTicks(Math.Max(wait.Ticks / 5, TimeSpan.FromSeconds(30).Ticks));
 
-        var above = current > median;
-        if (Threshold(values, median, spread, current, above, smallestWorthMentioning) is not { } limit) return null;
+        var start = entity.LastChanged;
+        var lastHeld = entity.LastChanged;
+        int seen = 0, broken = 0;
 
-        var unit = string.IsNullOrWhiteSpace(entity.Unit) ? "" : " " + entity.Unit;
-        var when = When(kind, band, weekend);
-
-        return new Anomaly
+        foreach (var (changedUtc, value) in newestFirst)
         {
-            DedupKey = $"outlier:{entity.EntityId}",
-            EntityId = entity.EntityId,
-            Kind = AnomalyKind.NumericOutlier,
-            DetectedUtc = nowUtc,
-            Severity = Times(z, options.OutlierThreshold),
-            Summary =
-                $"Reads {Ha.Number(current)}{unit}, well outside its normal range. " +
-                $"Usually near {Ha.Number(median)}{unit}{when}, judged over {values.Length} readings " +
-                $"spanning {Ha.Duration(Baselines.Span(baseline))}.",
-            SuggestedRequest =
-                $"Notify me when {entity.EntityId} goes {(above ? "above" : "below")} {Ha.Number(limit)}.",
-            EvidenceJson = Evidence(entity, new Dictionary<string, object?>
+            // The reading being judged; it holds by construction.
+            if (changedUtc == entity.LastChanged) continue;
+
+            seen++;
+            if (holds(value))
             {
-                ["current"] = Round(current),
-                ["unit"] = entity.Unit,
-                ["median"] = Round(median),
-                ["spread"] = Round(spread),
-                ["robust_z"] = Round(z),
-                ["samples"] = values.Length,
-                ["baseline_seconds"] = Math.Round(Baselines.Span(baseline).TotalSeconds),
-                ["baseline"] = Label(kind),
-                ["band_utc"] = BandLabel(band),
-                ["week_part"] = weekend ? "weekend" : "weekday",
-                ["suggested_threshold"] = limit,
-            }),
-        };
+                // Bridging a break is only allowed when it was brief; otherwise this is an earlier, separate run.
+                if (broken > 0 && lastHeld - changedUtc > flicker) break;
+
+                start = changedUtc;
+                lastHeld = changedUtc;
+                continue;
+            }
+
+            broken++;
+            if (broken > Math.Max(1, seen / 5)) break;
+        }
+
+        return start;
+    }
+
+    /// <summary>
+    /// Whether the reading has come back inside its range and stayed there for the wait -- the same evidence
+    /// raising demands, so an open finding is not closed by the one poll that happened to read normal and
+    /// reopened, as new, by the next. A sensor that reports rarely counts from its last change, and one
+    /// still beyond the bar on either side has not come back at all.
+    /// </summary>
+    public static bool BackInside(HaEntity entity, EntityHistory history, ScanOptions options, DateTimeOffset nowUtc)
+    {
+        if (entity.Numeric is not { } current) return false;
+        if (Normal(entity, history, options) is not { } normal) return false;
+
+        var (_, _, _, median, spread) = normal;
+        var bar = Math.Max(options.OutlierThreshold * spread, Baselines.MinimumMove(entity, median, current, options.MinimumEffect));
+
+        bool Inside(double value) => Math.Abs(value - median) < bar;
+        if (!Inside(current)) return false;
+
+        var since = RunStart(entity, ReadingsNewestFirst(entity, history), Inside, options.MinimumExcursion);
+        return nowUtc - since >= options.MinimumExcursion;
     }
 
     /// <summary>

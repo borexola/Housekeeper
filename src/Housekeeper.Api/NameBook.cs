@@ -64,4 +64,6 @@ public sealed class NamingHomeAssistant(IHomeAssistant inner, NameBook names) : 
         inner.CreateAutomationAsync(id, configJson, cancellationToken);
 
     public Task<bool> PingAsync(CancellationToken cancellationToken) => inner.PingAsync(cancellationToken);
+
+    public Task<string?> GetTimeZoneAsync(CancellationToken cancellationToken) => inner.GetTimeZoneAsync(cancellationToken);
 }

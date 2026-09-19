@@ -62,11 +62,17 @@ never fire. A threshold on a number is ALWAYS "numeric_state" with "above" or "b
 is a bare number, not a string: above: 25, not above: "25".
 
 CONDITIONS. Any part of the request beginning with "only", "but", "unless", "if", or naming a time
-window, is a condition — not part of the trigger. Put it in "conditions":
-  {"condition":"state","entity_id":"person.sam","state":"home"}
-  {"condition":"time","after":"22:00:00","before":"06:00:00"}
-  {"condition":"sun","after":"sunset"}
-  {"condition":"numeric_state","entity_id":"sensor.hall_lux","below":20}
+window, a part of the week, or dark and daylight, is a condition — not part of the trigger. Put it in
+"conditions", copying the shape for the wording:
+  "only if Sam is home"               {"condition":"state","entity_id":"person.sam","state":"home"}
+  "between 22:00 and 06:00"           {"condition":"time","after":"22:00:00","before":"06:00:00"}
+  "when it is dark" / "after dark"    {"condition":"sun","after":"sunset","before":"sunrise"}
+  "during the day"                    {"condition":"sun","after":"sunrise","before":"sunset"}
+  "after sunset" (until midnight)     {"condition":"sun","after":"sunset"}
+  "on weekdays"                       {"condition":"time","weekday":["mon","tue","wed","thu","fri"]}
+  "at weekends" / "on weekends"       {"condition":"time","weekday":["sat","sun"]}
+  "if the hall is dark"               {"condition":"numeric_state","entity_id":"sensor.hall_lux","below":20}
+"at 06:45 on weekdays" is a time trigger {"trigger":"time","at":"06:45:00"} PLUS the weekday condition.
 Write "conditions":[] only when the request contains no such limit.
 
 MODE. Decide it, do not default it:
@@ -125,7 +131,7 @@ EXAMPLES. Copy these shapes.
 {"alias":"Remind to lock the back door","description":"At eleven at night, reminds you if the back door is still unlocked.","triggers":[{"trigger":"time","at":"23:00:00"}],"conditions":[{"condition":"state","entity_id":"lock.back_door","state":"unlocked"}],"actions":[{"action":"notify.notify","data":{"message":"The back door is still unlocked."}}],"mode":"single"}
 
 4 a delay, so the mode is restart:
-{"alias":"Hall light on movement after dark","description":"Turns the hall light on when motion is seen after sunset and off two minutes later.","triggers":[{"trigger":"state","entity_id":"binary_sensor.hall_motion","to":"on"}],"conditions":[{"condition":"sun","after":"sunset"}],"actions":[{"action":"light.turn_on","target":{"entity_id":"light.hall"}},{"delay":"00:02:00"},{"action":"light.turn_off","target":{"entity_id":"light.hall"}}],"mode":"restart"}
+{"alias":"Hall light on movement after dark","description":"Turns the hall light on when motion is seen while it is dark and off two minutes later.","triggers":[{"trigger":"state","entity_id":"binary_sensor.hall_motion","to":"on"}],"conditions":[{"condition":"sun","after":"sunset","before":"sunrise"}],"actions":[{"action":"light.turn_on","target":{"entity_id":"light.hall"}},{"delay":"00:02:00"},{"action":"light.turn_off","target":{"entity_id":"light.hall"}}],"mode":"restart"}
 
 5 a reminder that repeats until the thing stops:
 {"alias":"Range left running","description":"Warns after the range has run for two hours, then every half hour until it is off.","triggers":[{"trigger":"state","entity_id":"binary_sensor.kitchen_range_running","to":"on","for":"02:00:00"}],"conditions":[],"actions":[{"repeat":{"while":[{"condition":"state","entity_id":"binary_sensor.kitchen_range_running","state":"on"}],"sequence":[{"action":"notify.notify","data":{"message":"The kitchen range has been running for over 2 hours."}},{"delay":"00:30:00"}]}}],"mode":"single"}

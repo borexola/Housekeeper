@@ -10,22 +10,41 @@ public static class AutomationInspector
 {
     private const int MaxDepth = 16;
 
-    public static (IReadOnlySet<string> Entities, IReadOnlySet<string> TriggerKinds) Inspect(JsonElement config)
+    /// <param name="Entities">Every entity id named anywhere in the config, including inside blueprint inputs.</param>
+    /// <param name="Areas">Area ids the config targets, which the caller can widen to the entities in them.</param>
+    /// <param name="Devices">Device ids the config targets or triggers on, likewise.</param>
+    public sealed record Inspection(
+        IReadOnlySet<string> Entities,
+        IReadOnlySet<string> TriggerKinds,
+        IReadOnlySet<string> Areas,
+        IReadOnlySet<string> Devices);
+
+    public static Inspection Inspect(JsonElement config)
     {
         HashSet<string> entities = new(StringComparer.Ordinal);
+        HashSet<string> areas = new(StringComparer.Ordinal);
+        HashSet<string> devices = new(StringComparer.Ordinal);
         HashSet<string> triggerKinds = new(StringComparer.Ordinal);
 
-        CollectEntities(config, entities, 0);
+        Collect(config, entities, areas, devices, 0, inBlueprintInput: false);
 
         if (config.ValueKind == JsonValueKind.Object)
             foreach (var name in new[] { "triggers", "trigger" })
                 if (config.TryGetProperty(name, out var block))
                     CollectTriggerKinds(block, triggerKinds);
 
-        return (entities, triggerKinds);
+        return new Inspection(entities, triggerKinds, areas, devices);
     }
 
-    private static void CollectEntities(JsonElement element, HashSet<string> into, int depth)
+    /// <summary>What an entity id looks like: a domain, a dot, an object id. Blueprint inputs carry them under any name.</summary>
+    private static bool LooksLikeEntityId(string text) =>
+        text.Length is > 3 and < 256 &&
+        text.IndexOf('.') is > 0 and var dot &&
+        dot < text.Length - 1 &&
+        text.IndexOf('.', dot + 1) < 0 &&
+        text.All(ch => char.IsAsciiLetterLower(ch) || char.IsAsciiDigit(ch) || ch is '_' or '.');
+
+    private static void Collect(JsonElement element, HashSet<string> entities, HashSet<string> areas, HashSet<string> devices, int depth, bool inBlueprintInput)
     {
         if (depth > MaxDepth) return;
 
@@ -34,15 +53,29 @@ public static class AutomationInspector
             case JsonValueKind.Object:
                 foreach (var property in element.EnumerateObject())
                 {
-                    if (property.Name == "entity_id") Add(property.Value, into);
-                    CollectEntities(property.Value, into, depth + 1);
+                    switch (property.Name)
+                    {
+                        case "entity_id": Add(property.Value, entities); break;
+                        case "area_id": Add(property.Value, areas); break;
+                        case "device_id": Add(property.Value, devices); break;
+                    }
+
+                    // A blueprint's inputs are where its entities live, under whatever names the blueprint
+                    // chose: {"use_blueprint":{"path":"...","input":{"motion_entity":"binary_sensor.hall"}}}.
+                    var inputs = inBlueprintInput || (property.Name == "input" && depth > 0);
+                    Collect(property.Value, entities, areas, devices, depth + 1, inputs);
                 }
 
                 break;
 
             case JsonValueKind.Array:
                 foreach (var item in element.EnumerateArray())
-                    CollectEntities(item, into, depth + 1);
+                    Collect(item, entities, areas, devices, depth + 1, inBlueprintInput);
+                break;
+
+            case JsonValueKind.String when inBlueprintInput:
+                var text = element.GetString();
+                if (!string.IsNullOrWhiteSpace(text) && LooksLikeEntityId(text.Trim())) entities.Add(text.Trim());
                 break;
         }
     }

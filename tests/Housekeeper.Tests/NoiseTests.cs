@@ -14,7 +14,8 @@ public class NoiseTests
 {
     private static readonly DateTimeOffset Now = new(2026, 3, 4, 2, 0, 0, TimeSpan.Zero);
 
-    private static ScanOptions Options => new();
+    /// <summary>The range gates alone: the readings here are dated a minute or two ago, and how long a reading has stayed out is tested on its own.</summary>
+    private static ScanOptions Options => new() { MinimumExcursion = TimeSpan.Zero };
 
     /// <summary>Readings ending just before <paramref name="changed"/>, oldest first, as the store returns them.</summary>
     private static List<StateSample> Readings(DateTimeOffset changed, TimeSpan step, params double[] values)

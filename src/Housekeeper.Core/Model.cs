@@ -141,6 +141,12 @@ public enum AnomalyKind
     MissingEntity = 3,
     /// <summary>A rule the user set through a concern fired: a reading past a line, a state held too long.</summary>
     Concern = 4,
+    /// <summary>
+    /// Something the user does by hand, regularly enough to be a routine, that an automation could do for
+    /// them: the pantry light after the pantry motion sensor, the porch light at about ten past nine. Not
+    /// a problem, an opportunity; it is listed apart and never counts as serious.
+    /// </summary>
+    Habit = 5,
 }
 
 public enum AnomalyStatus
@@ -177,6 +183,13 @@ public sealed record Anomaly
     /// list — an undifferentiated column of nineteen cards buries the freezer door among the smart plugs.
     /// </summary>
     public double Severity { get; init; } = 1;
+
+    /// <summary>
+    /// How many times the user has dismissed this finding. Each time raises the bar it has to clear to come
+    /// back; after three it stays quiet for good. A dismissal is the user teaching the detector, and a
+    /// detector that forgets the lesson after a week is not learning anything.
+    /// </summary>
+    public int Dismissals { get; init; }
 }
 
 /// <summary>

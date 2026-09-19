@@ -295,10 +295,32 @@ public class AutomationInspectorTests
             }
             """);
 
-        var (entities, kinds) = AutomationInspector.Inspect(document.RootElement);
+        var inspection = AutomationInspector.Inspect(document.RootElement);
 
-        Assert.Equal(["binary_sensor.door", "light.a", "light.b"], entities.OrderBy(x => x, StringComparer.Ordinal));
-        Assert.Equal(["state"], kinds);
+        Assert.Equal(["binary_sensor.door", "light.a", "light.b"], inspection.Entities.OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Equal(["state"], inspection.TriggerKinds);
+        Assert.Empty(inspection.Areas);
+        Assert.Empty(inspection.Devices);
+    }
+
+    [Fact]
+    public void Reports_areas_devices_and_blueprint_inputs_too()
+    {
+        using var document = System.Text.Json.JsonDocument.Parse("""
+            {
+              "alias": "Editor-built",
+              "triggers": [{"trigger": "device", "device_id": "abc123", "domain": "binary_sensor", "type": "motion"}],
+              "actions": [{"action": "light.turn_off", "target": {"area_id": ["living_room", "hall"]}}],
+              "use_blueprint": {"path": "motion_light.yaml", "input": {"motion_entity": "binary_sensor.hall_motion", "light_target": {"entity_id": "light.hall"}, "no_motion_wait": 120}}
+            }
+            """);
+
+        var inspection = AutomationInspector.Inspect(document.RootElement);
+
+        Assert.Equal(["binary_sensor.hall_motion", "light.hall"], inspection.Entities.OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Equal(["hall", "living_room"], inspection.Areas.OrderBy(x => x, StringComparer.Ordinal));
+        Assert.Equal(["abc123"], inspection.Devices);
+        Assert.Equal(["device"], inspection.TriggerKinds);
     }
 }
 

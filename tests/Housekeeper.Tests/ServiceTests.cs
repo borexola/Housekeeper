@@ -261,6 +261,9 @@ public class SqliteStoreTests : StoreFixture
                 ALTER TABLE proposals DROP COLUMN dismissed_utc;
                 DROP INDEX IF EXISTS ix_anomalies_severity;
                 ALTER TABLE anomalies DROP COLUMN severity;
+                ALTER TABLE concerns DROP COLUMN note;
+                ALTER TABLE concerns DROP COLUMN provisional;
+                ALTER TABLE anomalies DROP COLUMN dismissals;
                 PRAGMA user_version = 1;
                 """;
             await command.ExecuteNonQueryAsync();

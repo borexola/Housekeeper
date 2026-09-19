@@ -64,9 +64,21 @@ own recorder already holds, so it is not blind for its first day):
 ```
 poll /api/states → store state changes → three detectors → a list you triage
                                           ├─ stuck state   (held far longer than it ever has)
-                                          ├─ numeric outlier (robust MAD z-score)
+                                          ├─ numeric outlier (robust MAD z-score, and it has to stay out)
                                           └─ unavailable   (a reliable sensor gone quiet)
+                                    └──→ once an hour, routines → things you could automate
 ```
+
+It also learns how you use the house. Once an hour it reads weeks of your own switching and looks for two
+shapes: *the pantry light goes on within a minute of the pantry motion sensor, nearly every time after
+dark*, and *the porch light goes off at about ten past eleven, most nights*. Each one is offered in your
+own words with the numbers behind it — *seen 11 times over 6 days, 92% of the time* — and a one-click
+draft, and whatever an automation already does is left out. The bar is deliberately high: a cue in another
+room needs twice the evidence, only the strongest cue is offered for any one thing, a same-time routine has
+to beat what random switching would produce, anything done with a machine's punctuality is taken to be an
+automation you have not told it about, and a routine you put away is never suggested again. Findings learn
+too: dismiss one and it has to be further over the line to come back; dismiss it three times and it stays
+quiet for good.
 
 You can also say what you worry about, in your own words: *"the freezer warming up"*, *"the garage door left
 open at night"*, *"the kids' room getting too cold"*. The model reads each concern into the entities it is

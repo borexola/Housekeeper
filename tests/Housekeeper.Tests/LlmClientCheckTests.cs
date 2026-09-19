@@ -214,8 +214,10 @@ public class LlmClientCheckTests
     [Fact]
     public void The_name_reads_well_without_a_model()
     {
-        Assert.Equal("OpenAI (server's loaded model)", Make("OpenAI", "http://model.test:8080/v1", "").Client.Name);
-        Assert.Equal("Ollama (no model chosen)", Make("Ollama", "http://model.test:11434", "").Client.Name);
-        Assert.Equal("Ollama (phi4)", Make("Ollama", "http://model.test:11434", "phi4").Client.Name);
+        // Read inside a sentence -- "the model did not answer (...)". A server with no model named is named
+        // by where it is; "server's loaded model" in that position read as a product nobody has.
+        Assert.Equal("OpenAI-compatible server at model.test:8080", Make("OpenAI", "http://model.test:8080/v1", "").Client.Name);
+        Assert.Equal("Ollama, no model chosen", Make("Ollama", "http://model.test:11434", "").Client.Name);
+        Assert.Equal("Ollama, phi4", Make("Ollama", "http://model.test:11434", "phi4").Client.Name);
     }
 }

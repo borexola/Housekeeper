@@ -32,6 +32,27 @@ public class ConcernMatchingTests
     }
 
     [Fact]
+    public void A_state_word_that_names_nothing_falls_back_to_the_kind_of_thing()
+    {
+        List<HaEntity> house =
+        [
+            .. House,
+            Build.Entity("lock.front_door", "locked", friendlyName: "Front door", area: "Hall"),
+            Build.Entity("binary_sensor.back_door", "off", friendlyName: "Back door", deviceClass: "door"),
+        ];
+
+        // "unlocked" is in no entity's name, and used to sink the whole concern. The locks and the door
+        // sensors are what it means.
+        var matched = Concerns.Match("a door left unlocked at night", house);
+
+        Assert.Contains("lock.front_door", matched);
+        Assert.Contains("binary_sensor.back_door", matched);
+        Assert.Contains("binary_sensor.freezer_door", matched);
+        Assert.DoesNotContain("sensor.freezer_temperature", matched);
+        Assert.DoesNotContain("light.hall", matched);
+    }
+
+    [Fact]
     public void A_kind_alone_matches_everything_of_that_kind()
     {
         Assert.Equal(["sensor.freezer_temperature", "sensor.garage_temperature"], Concerns.Match("temperature", House).Order());
@@ -180,8 +201,71 @@ public class ConcernServiceTests : StoreFixture
         Assert.False(concern.Interpreted);
         Assert.Equal(["sensor.dryer_power"], concern.Entities);
         Assert.Equal(WatchKind.Any, concern.Rule.Kind);
-        Assert.Contains("Matched by name", concern.Explanation);
-        Assert.Contains("did not answer", concern.Explanation);
+        Assert.Equal("Matched by name to 1 entity.", concern.Explanation);
+        Assert.Contains("did not answer", concern.Note);
+        Assert.True(concern.Provisional);
+    }
+
+    [Fact]
+    public async Task A_concern_the_model_could_not_read_is_read_again_when_it_answers()
+    {
+        _ha.Entities.Add(Build.Entity("sensor.dryer_power", "0", friendlyName: "Dryer power", deviceClass: "power", unit: "W"));
+        _llm.Response = null;
+        var service = Service();
+        var concern = await service.AddAsync("dryer power", CancellationToken.None);
+        Assert.True(concern.Provisional);
+
+        // Still down: still provisional, and the note stays.
+        Assert.Equal(0, await service.ReadPendingAsync(CancellationToken.None));
+        Assert.True((await Store.GetConcernAsync(concern.Id, CancellationToken.None))!.Provisional);
+
+        // Not asked again on the very next tick: a model that is down is asked once per interval, not once
+        // per tick per concern.
+        _llm.Response = """{"entity_ids":["sensor.dryer_power"],"kind":"above","value":1500,"explanation":"Watching the dryer's power for going above 1500 W."}""";
+        var calls = _llm.Calls;
+        Assert.Equal(0, await service.ReadPendingAsync(CancellationToken.None));
+        Assert.Equal(calls, _llm.Calls);
+
+        Clock.Advance(TimeSpan.FromMinutes(6));
+        Assert.Equal(1, await service.ReadPendingAsync(CancellationToken.None));
+
+        var read = (await Store.GetConcernAsync(concern.Id, CancellationToken.None))!;
+        Assert.True(read.Interpreted);
+        Assert.False(read.Provisional);
+        Assert.Null(read.Note);
+        Assert.Equal(WatchKind.Above, read.Rule.Kind);
+        Assert.Equal("Watching the dryer's power for going above 1500 W.", read.Explanation);
+        Assert.Equal(0, await service.ReadPendingAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task The_model_naming_nothing_is_an_answer_not_a_wait()
+    {
+        _ha.Entities.Add(Build.Entity("sensor.dryer_power", "0", friendlyName: "Dryer power", deviceClass: "power", unit: "W"));
+        _llm.Response = """{"entity_ids":[],"kind":"any","explanation":"Nothing here measures the dryer."}""";
+
+        var concern = await Service().AddAsync("dryer power", CancellationToken.None);
+
+        Assert.False(concern.Provisional);
+        Assert.Equal(["sensor.dryer_power"], concern.Entities);
+        Assert.Contains("named nothing that exists here", concern.Note);
+        Assert.Contains("Nothing here measures the dryer.", concern.Note);
+    }
+
+    [Fact]
+    public async Task Without_a_model_chosen_the_concern_waits_for_one()
+    {
+        _ha.Entities.Add(Build.Entity("sensor.dryer_power", "0", friendlyName: "Dryer power", deviceClass: "power", unit: "W"));
+        var settings = new FakeSettings();
+        settings.Current.Llm.Model = "";
+        var service = new ConcernService(_ha, _llm, Store, settings, Clock, NullLogger<ConcernService>.Instance);
+
+        var concern = await service.AddAsync("dryer power", CancellationToken.None);
+
+        Assert.True(concern.Provisional);
+        Assert.Contains("No model is chosen", concern.Note);
+        Assert.Equal(0, _llm.Calls);
+        Assert.Equal(0, await service.ReadPendingAsync(CancellationToken.None));
     }
 }
 

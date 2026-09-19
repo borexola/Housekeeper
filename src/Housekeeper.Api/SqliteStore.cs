@@ -11,7 +11,7 @@ namespace Housekeeper.Api;
 /// </summary>
 public sealed class SqliteStore(string connectionString) : IStore
 {
-    private const int SchemaVersion = 5;
+    private const int SchemaVersion = 7;
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -59,6 +59,8 @@ public sealed class SqliteStore(string connectionString) : IStore
             if (current < 3) await ExecuteAsync(connection, SchemaV3, cancellationToken).ConfigureAwait(false);
             if (current < 4) await ExecuteAsync(connection, SchemaV4, cancellationToken).ConfigureAwait(false);
             if (current < 5) await ExecuteAsync(connection, SchemaV5, cancellationToken).ConfigureAwait(false);
+            if (current < 6) await ExecuteAsync(connection, SchemaV6, cancellationToken).ConfigureAwait(false);
+            if (current < 7) await ExecuteAsync(connection, SchemaV7, cancellationToken).ConfigureAwait(false);
 
             await ExecuteAsync(connection, $"PRAGMA user_version={SchemaVersion};", cancellationToken).ConfigureAwait(false);
             await ExecuteAsync(connection, "COMMIT;", cancellationToken).ConfigureAwait(false);
@@ -105,6 +107,20 @@ public sealed class SqliteStore(string connectionString) : IStore
             interpreted   INTEGER NOT NULL DEFAULT 0,
             created_utc   INTEGER NOT NULL
         );
+        """;
+
+    /// <summary>
+    /// Version 6: a concern keeps why the model's reading is missing apart from what was matched, and whether
+    /// the model should be asked again.
+    /// </summary>
+    private const string SchemaV6 = """
+        ALTER TABLE concerns ADD COLUMN note TEXT;
+        ALTER TABLE concerns ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0;
+        """;
+
+    /// <summary>Version 7: a finding remembers how many times the user dismissed it, so a dismissal teaches the detector.</summary>
+    private const string SchemaV7 = """
+        ALTER TABLE anomalies ADD COLUMN dismissals INTEGER NOT NULL DEFAULT 0;
         """;
 
     private const string Schema = """
@@ -480,6 +496,47 @@ public sealed class SqliteStore(string connectionString) : IStore
         return await ReadGroupedAsync(command, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>How many entity ids one query names. SQLite takes far more, but the statement stays readable in a trace.</summary>
+    private const int IdsPerQuery = 400;
+
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<StateSample>>> GetSamplesForAsync(
+        IReadOnlyCollection<string> entityIds,
+        DateTimeOffset sinceUtc,
+        int maxPerEntity,
+        CancellationToken cancellationToken)
+    {
+        Dictionary<string, IReadOnlyList<StateSample>> all = new(StringComparer.Ordinal);
+        if (entityIds.Count == 0) return all;
+
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var batch in entityIds.Distinct(StringComparer.Ordinal).Chunk(IdsPerQuery))
+        {
+            await using var command = connection.CreateCommand();
+
+            var names = batch.Select((_, i) => $"$e{i}").ToArray();
+            command.CommandText = $"""
+                SELECT entity_id, state, numeric, changed_utc
+                FROM (
+                    SELECT entity_id, state, numeric, changed_utc,
+                           ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY changed_utc DESC) AS rank
+                    FROM samples
+                    WHERE changed_utc >= $since AND entity_id IN ({string.Join(", ", names)})
+                )
+                WHERE rank <= $cap
+                ORDER BY entity_id, changed_utc;
+                """;
+            command.Parameters.AddWithValue("$since", sinceUtc.ToUnixTimeMilliseconds());
+            command.Parameters.AddWithValue("$cap", Math.Max(1, maxPerEntity));
+            for (var i = 0; i < batch.Length; i++) command.Parameters.AddWithValue(names[i], batch[i]);
+
+            foreach (var (entityId, samples) in await ReadGroupedAsync(command, cancellationToken).ConfigureAwait(false))
+                all[entityId] = samples;
+        }
+
+        return all;
+    }
+
     /// <summary>An hour, in milliseconds: the bucket numeric history is thinned within.</summary>
     private const long BucketMillis = 60 * 60 * 1000;
 
@@ -608,14 +665,20 @@ public sealed class SqliteStore(string connectionString) : IStore
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
 
+        // A routine the user put away is kept for good: the row is the record of their "no", and without it
+        // the same suggestion comes back as new the hour after the prune. A finding dismissed enough times to
+        // be silenced is kept for the same reason.
         command.CommandText = """
             DELETE FROM anomalies
             WHERE status IN ($dismissed, $resolved)
               AND decided_utc IS NOT NULL
-              AND decided_utc < $before;
+              AND decided_utc < $before
+              AND NOT (status = $dismissed AND (kind = $habit OR dismissals >= $silenced));
             """;
         command.Parameters.AddWithValue("$dismissed", (int)AnomalyStatus.Dismissed);
         command.Parameters.AddWithValue("$resolved", (int)AnomalyStatus.Resolved);
+        command.Parameters.AddWithValue("$habit", (int)AnomalyKind.Habit);
+        command.Parameters.AddWithValue("$silenced", AnomalyScanner.DismissalsToSilence);
         command.Parameters.AddWithValue("$before", decidedBefore.ToUnixTimeMilliseconds());
 
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
@@ -648,9 +711,9 @@ public sealed class SqliteStore(string connectionString) : IStore
 
         command.CommandText = """
             INSERT INTO anomalies
-                (dedup_key, entity_id, kind, summary, evidence_json, suggested_request, status, detected_utc, decided_utc, proposal_id, severity)
+                (dedup_key, entity_id, kind, summary, evidence_json, suggested_request, status, detected_utc, decided_utc, proposal_id, severity, dismissals)
             VALUES
-                ($dedup, $entity, $kind, $summary, $evidence, $suggested, $status, $detected, $decided, $proposal, $severity)
+                ($dedup, $entity, $kind, $summary, $evidence, $suggested, $status, $detected, $decided, $proposal, $severity, $dismissals)
             ON CONFLICT (dedup_key) DO UPDATE SET
                 summary = excluded.summary,
                 evidence_json = excluded.evidence_json,
@@ -708,7 +771,7 @@ public sealed class SqliteStore(string connectionString) : IStore
             UPDATE anomalies SET
                 entity_id = $entity, kind = $kind, summary = $summary, evidence_json = $evidence,
                 suggested_request = $suggested, status = $status, detected_utc = $detected,
-                decided_utc = $decided, proposal_id = $proposal, severity = $severity
+                decided_utc = $decided, proposal_id = $proposal, severity = $severity, dismissals = $dismissals
             WHERE dedup_key = $dedup;
             """;
 
@@ -723,19 +786,41 @@ public sealed class SqliteStore(string connectionString) : IStore
         await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO concerns (text, entities_json, rule_json, explanation, interpreted, created_utc)
-            VALUES ($text, $entities, $rule, $explanation, $interpreted, $created)
+            INSERT INTO concerns (text, entities_json, rule_json, explanation, interpreted, created_utc, note, provisional)
+            VALUES ($text, $entities, $rule, $explanation, $interpreted, $created, $note, $provisional)
             RETURNING id;
             """;
+        BindConcern(command, concern);
+        command.Parameters.AddWithValue("$created", concern.CreatedUtc.ToUnixTimeMilliseconds());
+
+        var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+        return concern with { Id = id };
+    }
+
+    public async Task UpdateConcernAsync(Concern concern, CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenAsync(cancellationToken).ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE concerns SET
+                text = $text, entities_json = $entities, rule_json = $rule, explanation = $explanation,
+                interpreted = $interpreted, note = $note, provisional = $provisional
+            WHERE id = $id;
+            """;
+        BindConcern(command, concern);
+        command.Parameters.AddWithValue("$id", concern.Id);
+        await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private static void BindConcern(SqliteCommand command, Concern concern)
+    {
         command.Parameters.AddWithValue("$text", concern.Text);
         command.Parameters.AddWithValue("$entities", JsonSerializer.Serialize(concern.Entities));
         command.Parameters.AddWithValue("$rule", JsonSerializer.Serialize(concern.Rule));
         command.Parameters.AddWithValue("$explanation", (object?)concern.Explanation ?? DBNull.Value);
         command.Parameters.AddWithValue("$interpreted", concern.Interpreted ? 1 : 0);
-        command.Parameters.AddWithValue("$created", concern.CreatedUtc.ToUnixTimeMilliseconds());
-
-        var id = Convert.ToInt64(await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
-        return concern with { Id = id };
+        command.Parameters.AddWithValue("$note", (object?)concern.Note ?? DBNull.Value);
+        command.Parameters.AddWithValue("$provisional", concern.Provisional ? 1 : 0);
     }
 
     public async Task<IReadOnlyList<Concern>> ListConcernsAsync(CancellationToken cancellationToken)
@@ -772,7 +857,7 @@ public sealed class SqliteStore(string connectionString) : IStore
         return await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) > 0;
     }
 
-    private const string ConcernColumns = "id, text, entities_json, rule_json, explanation, interpreted, created_utc";
+    private const string ConcernColumns = "id, text, entities_json, rule_json, explanation, interpreted, created_utc, note, provisional";
 
     private static Concern ReadConcern(SqliteDataReader row) => new()
     {
@@ -783,10 +868,12 @@ public sealed class SqliteStore(string connectionString) : IStore
         Explanation = row.IsDBNull(4) ? null : row.GetString(4),
         Interpreted = row.GetInt64(5) != 0,
         CreatedUtc = DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(6)),
+        Note = row.IsDBNull(7) ? null : row.GetString(7),
+        Provisional = row.GetInt64(8) != 0,
     };
 
     private const string AnomalyColumns =
-        "id, dedup_key, entity_id, kind, summary, evidence_json, suggested_request, status, detected_utc, decided_utc, proposal_id, severity";
+        "id, dedup_key, entity_id, kind, summary, evidence_json, suggested_request, status, detected_utc, decided_utc, proposal_id, severity, dismissals";
 
     private static void BindAnomaly(SqliteCommand command, Anomaly anomaly)
     {
@@ -801,6 +888,7 @@ public sealed class SqliteStore(string connectionString) : IStore
         command.Parameters.AddWithValue("$severity", anomaly.Severity);
         command.Parameters.AddWithValue("$decided", anomaly.DecidedUtc?.ToUnixTimeMilliseconds() ?? (object)DBNull.Value);
         command.Parameters.AddWithValue("$proposal", (object?)anomaly.ProposalId ?? DBNull.Value);
+        command.Parameters.AddWithValue("$dismissals", anomaly.Dismissals);
     }
 
     private static Anomaly ReadAnomaly(IDataRecord row) => new()
@@ -817,6 +905,7 @@ public sealed class SqliteStore(string connectionString) : IStore
         DecidedUtc = row.IsDBNull(9) ? null : DateTimeOffset.FromUnixTimeMilliseconds(row.GetInt64(9)),
         ProposalId = row.IsDBNull(10) ? null : row.GetInt64(10),
         Severity = row.IsDBNull(11) ? 1 : row.GetDouble(11),
+        Dismissals = row.IsDBNull(12) ? 0 : row.GetInt32(12),
     };
 
     // ---- plumbing ----

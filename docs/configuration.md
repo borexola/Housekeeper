@@ -113,20 +113,29 @@ never lets a wrong answer through regardless of how many attempts it took.
 | `IncludeAll` | `true` | Observe every entity. On by default so a new install notices things without being configured first. |
 | `Include` | *(empty)* | Entity id globs, e.g. `binary_sensor.*`. Only consulted when `IncludeAll` is off, and then an empty list observes nothing. |
 | `Exclude` | *(empty)* | Applied last, so it narrows `IncludeAll` as well as `Include`. The dashboard's Ignore buttons add entity ids here. |
-| `MaxTrackedEntities` | `500` | Hard cap, applied after the globs. Entities are taken in entity-id order, so on a large install this decides *which* ones are watched — raise it or narrow with `Exclude`. |
+| `MaxTrackedEntities` | `500` | Hard cap, applied after the globs. When it binds, the sun and the things a routine is made of (lights, switches, covers, locks, fans, media players, motion and door sensors, people) are kept first, then readings, then Home Assistant's own machinery, and by id within each — raise it or narrow with `Exclude`. `sun.sun` is watched whenever Home Assistant reports it, whatever `Include` says, unless it is excluded by name. |
 | `MinimumStuckDuration` | `10m` | A stuck state is never reported below this. |
 | `StuckMultiplier` | `3.0` | How many times its historical worst case before reporting. |
 | `MinimumUnavailableDuration` | `30m` | |
 | `OutlierThreshold` | `4.0` | Robust z-score for numeric readings. |
 | `MinimumSamples` | `12` | Below this a detector stays quiet. |
-| `RedetectAfter` | `7d` | How long a dismissal keeps a finding quiet. |
+| `MinimumNumericSamples` | `30` | Readings a numeric baseline needs before it is one. |
+| `MinimumBaselineSpan` | `6h` | How far back a numeric baseline has to reach before a reading is judged against it. |
+| `MinimumEffect` | `0.15` | The share of its own value a reading must move before the move is worth mentioning; per-device-class floors in real units apply as well. |
+| `MinimumExcursion` | `10m` | How long a reading has to stay out of its range before it is reported. A kettle or a sensor glitch is a spike gone by the next scan. A sensor that reports rarely counts from its last change. Zero reports on the first reading. |
+| `GroupByDevice` | `true` | One card per device rather than one per entity when several readings on it move together. |
+| `RealtimeUpdates` | `true` | Keep a WebSocket open so non-numeric changes are recorded as they happen. |
+| `RedetectAfter` | `7d` | How long a dismissal keeps a finding quiet. Each dismissal also raises the bar the same finding has to clear to come back (half a doubling per dismissal), and the third silences it for good. Routines put away stay away from the first; neither kind of "no" is ever pruned. |
+| `LearnHabits` | `true` | Once an hour, look through the stored history for routines — things you do by hand at about the same time or right after the same event — and offer to automate them. |
+| `HabitMinimumTimes` | `5` | How many times a routine has to have happened, on at least three different days, before it is offered. Doubled for a cue in another room. |
+| `HabitConfidence` | `0.6` | How reliably a routine has to hold: the share of the times the cue happened, with the thing not already done, that you did it within a few minutes. At least 0.8 for a cue in another room. |
 
 Out of the box everything is watched, so there is nothing to configure before Housekeeper starts noticing
 things. Narrow it with **Ignore** rather than by listing what you want — that is what the dashboard's Ignore
 buttons write to, and it keeps working as you add devices. If you would rather name what to watch, turn
 **Watch everything** off and fill in **Watch**; the settings page warns if you leave both empty.
 
-On a large install the `MaxTrackedEntities` cap matters: entities are taken in entity-id order, so watching
+On a large install the `MaxTrackedEntities` cap matters: the sun and the entities a routine could be about are kept first, then readings, then Home Assistant's own machinery, so watching
 everything on a house with more entities than the cap silently watches the alphabetically-first ones. The
 dashboard's Watching tile shows the number actually observed, so compare it against what Home Assistant
 reports and raise the cap or add Ignore globs if it is short.

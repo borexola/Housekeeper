@@ -177,7 +177,9 @@ public static class SettingsCatalog
             SettingKind.List, o => o.Scan.Exclude),
 
         new("Housekeeper:Scan:MaxTrackedEntities", "Scan", "Maximum tracked entities",
-            "Hard cap, so a large install cannot fill the sample table.",
+            "Hard cap, so a large install cannot fill the sample table. When it binds, the sun and the things a "
+            + "routine is made of -- lights, switches, covers, locks, fans, media players, motion and door "
+            + "sensors, people -- are kept first, then readings, then Home Assistant's own machinery.",
             SettingKind.Number, o => o.Scan.MaxTrackedEntities, Minimum: 1, Maximum: 100_000),
 
         new("Housekeeper:Scan:MinimumStuckDuration", "Scan", "Never report a stuck state below",
@@ -244,6 +246,31 @@ public static class SettingsCatalog
         new("Housekeeper:Scan:RedetectAfter", "Scan", "Dismissal stays quiet for",
             "How long a dismissed finding is suppressed before it may be raised again.",
             SettingKind.Duration, o => o.Scan.RedetectAfter),
+
+        new("Housekeeper:Scan:MinimumExcursion", "Scan", "Out of range for at least",
+            "How long a reading has to stay outside its usual range before it is reported. A kettle, a "
+            + "microwave or a sensor glitch is a spike that is gone by the next scan, and each one used to be "
+            + "a card that opened and closed within a minute. A sensor that reports rarely counts from its last "
+            + "change, so a thermometer stuck high is not made to wait. Zero reports on the first reading.",
+            SettingKind.Duration, o => o.Scan.MinimumExcursion),
+
+        new("Housekeeper:Scan:LearnHabits", "Scan", "Learn routines",
+            "Look through the stored history, once an hour, for things you do by hand at about the same time "
+            + "or right after the same event, and offer to automate them. Whatever an automation already does "
+            + "is left out. Nothing is created until you confirm a draft.",
+            SettingKind.Bool, o => o.Scan.LearnHabits),
+
+        new("Housekeeper:Scan:HabitMinimumTimes", "Scan", "Routine seen at least",
+            "How many times something has to have happened, on at least three different days, before it is "
+            + "offered as a routine.",
+            SettingKind.Number, o => o.Scan.HabitMinimumTimes, Minimum: 2, Maximum: 1000),
+
+        new("Housekeeper:Scan:HabitConfidence", "Scan", "Routine reliability",
+            "How reliably a routine has to hold before it is offered, as a fraction: 0.6 means that six times "
+            + "in ten, when the cue happened and the thing was not already on, you turned it on within a few "
+            + "minutes. That is the share of the time an automation built from it would be doing what you "
+            + "would have done anyway.",
+            SettingKind.Decimal, o => o.Scan.HabitConfidence, Minimum: 0.1, Maximum: 1),
 
         // ---- Service ----
         new("Housekeeper:Api:BindAddress", "Api", "Bind address",

@@ -67,6 +67,41 @@ public sealed class HomeAssistantClient(
         }
     }
 
+    /// <summary>The zone last read, from which address, and when. Asked for every hour by the routine search; it changes about never.</summary>
+    private (string Zone, string BaseUrl, DateTimeOffset At)? _timeZone;
+
+    private static readonly TimeSpan TimeZoneFreshFor = TimeSpan.FromHours(6);
+
+    public async Task<string?> GetTimeZoneAsync(CancellationToken cancellationToken)
+    {
+        var now = clock.GetUtcNow();
+        var baseUrl = settings.Current.HomeAssistant.BaseUrl ?? "";
+        if (_timeZone is { } held && held.BaseUrl == baseUrl && now - held.At < TimeZoneFreshFor) return held.Zone;
+
+        string? zone = null;
+        try
+        {
+            var response = await SendAsync(HttpMethod.Get, "api/config", null, cancellationToken).ConfigureAwait(false);
+            if (response.Ok)
+            {
+                using var document = Parse(response.Body, "the configuration");
+                if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                    document.RootElement.TryGetProperty("time_zone", out var value) &&
+                    value.ValueKind == JsonValueKind.String)
+                    zone = value.GetString();
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or HomeAssistantException)
+        {
+            logger.LogDebug(ex, "Could not read Home Assistant's time zone.");
+        }
+
+        // A failure is not cached. Standing on a null for six hours meant six hours of routines worked out
+        // in UTC, the container's own zone, for a house that is not in it.
+        if (!string.IsNullOrWhiteSpace(zone)) _timeZone = (zone, baseUrl, now);
+        return zone;
+    }
+
     public async Task<IReadOnlyList<HaEntity>> GetEntitiesAsync(CancellationToken cancellationToken)
     {
         var response = await SendAsync(HttpMethod.Get, "api/states", null, cancellationToken).ConfigureAwait(false);
@@ -162,11 +197,12 @@ public sealed class HomeAssistantClient(
             .ToList();
 
         var key = string.Join("\n", identified.Select(pair => pair.ConfigId).Order(StringComparer.Ordinal));
-        return _automations.GetAsync(key, () => ReadAllAsync(identified, cancellationToken), cancellationToken);
+        return _automations.GetAsync(key, () => ReadAllAsync(identified, entities, cancellationToken), cancellationToken);
     }
 
     private async Task<IReadOnlyList<ExistingAutomation>> ReadAllAsync(
         List<(string ConfigId, string EntityId, string Alias)> identified,
+        IReadOnlyList<HaEntity> entities,
         CancellationToken cancellationToken)
     {
         List<ExistingAutomation> automations = [];
@@ -177,7 +213,7 @@ public sealed class HomeAssistantClient(
             await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                return await ReadAutomationAsync(pair.ConfigId, pair.EntityId, pair.Alias, cancellationToken).ConfigureAwait(false);
+                return await ReadAutomationAsync(pair.ConfigId, pair.EntityId, pair.Alias, entities, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -266,10 +302,33 @@ public sealed class HomeAssistantClient(
     /// <summary>One automation's config, and whether Home Assistant refused to hand it over at all.</summary>
     private readonly record struct ConfigRead(ExistingAutomation? Automation, bool Refused);
 
+    /// <summary>An area's id as Home Assistant makes it from the name: lower case, runs of anything else as one underscore.</summary>
+    internal static string Slug(string name)
+    {
+        var chars = new System.Text.StringBuilder(name.Length);
+        var underscore = false;
+        foreach (var ch in name.Trim().ToLowerInvariant())
+        {
+            if (char.IsAsciiLetterOrDigit(ch))
+            {
+                chars.Append(ch);
+                underscore = false;
+            }
+            else if (!underscore && chars.Length > 0)
+            {
+                chars.Append('_');
+                underscore = true;
+            }
+        }
+
+        return chars.ToString().TrimEnd('_');
+    }
+
     private async Task<ConfigRead> ReadAutomationAsync(
         string configId,
         string entityId,
         string alias,
+        IReadOnlyList<HaEntity> entities,
         CancellationToken cancellationToken)
     {
         try
@@ -294,7 +353,17 @@ public sealed class HomeAssistantClient(
             }
 
             using var document = JsonDocument.Parse(response.Body);
-            var (entities, triggerKinds) = AutomationInspector.Inspect(document.RootElement);
+            var inspection = AutomationInspector.Inspect(document.RootElement);
+
+            // An automation built in the editor often targets an area or a device rather than entities.
+            // Those are the entities in that area and on that device, as far as this house's own list can
+            // say: device ids match exactly, and an area id is the area's name as Home Assistant slugs it.
+            HashSet<string> touched = new(inspection.Entities, StringComparer.Ordinal);
+            if (inspection.Areas.Count > 0 || inspection.Devices.Count > 0)
+                foreach (var entity in entities)
+                    if ((entity.DeviceId is { } device && inspection.Devices.Contains(device)) ||
+                        (entity.Area is { } area && inspection.Areas.Contains(Slug(area))))
+                        touched.Add(entity.EntityId);
 
             var configAlias = document.RootElement.ValueKind == JsonValueKind.Object &&
                               document.RootElement.TryGetProperty("alias", out var aliasElement) &&
@@ -302,7 +371,7 @@ public sealed class HomeAssistantClient(
                 ? aliasElement.GetString() ?? alias
                 : alias;
 
-            return new ConfigRead(new ExistingAutomation(configId, entityId, configAlias, entities, triggerKinds), false);
+            return new ConfigRead(new ExistingAutomation(configId, entityId, configAlias, touched, inspection.TriggerKinds), false);
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or HomeAssistantException)
         {

@@ -52,7 +52,7 @@ internal static class Dashboard
   summary.reveal::before { content: "+ "; }
   details[open] summary.reveal::before { content: "− "; }
   summary.reveal:hover { color: var(--ink); }
-  details pre { margin-top: 8px; }
+  details pre, details .code { margin-top: 8px; }
   .safety { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
 
   /* The card an action just produced is scrolled to and outlined so the eye lands on it. */
@@ -121,41 +121,6 @@ function say(message, kind) {
   status.className = kind ? 'status ' + kind : 'status';
 }
 
-// ---- numbers people can read ----
-
-/** 1,284 · 12.9K · 4.2M. Compact only once the digits stop being scannable. */
-function compact(n) {
-  if (n === null || n === undefined) return '—';
-  if (n < 10000) return n.toLocaleString();
-  if (n < 1000000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
-  return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
-}
-
-/** Says a span of seconds the way the server says one, so the two never disagree. */
-function spoken(seconds) {
-  const s = Math.abs(seconds);
-  if (s < 90) return Math.round(s) + ' seconds';
-  if (s < 5400) return Math.round(s / 60) + ' minutes';
-  if (s < 172800) return (s / 3600).toFixed(1) + ' hours';
-  return (s / 86400).toFixed(1) + ' days';
-}
-
-/** Seconds from now: negative in the past, positive in the future. */
-function fromNow(iso) {
-  return iso ? (new Date(iso).getTime() - Date.now()) / 1000 : null;
-}
-
-/** "just now" · "4 min ago" · "3 h ago" · "yesterday" · "6 d ago", for the corner of a card. */
-function ago(iso) {
-  const s = -fromNow(iso);
-  if (s === null || isNaN(s)) return '';
-  if (s < 45) return 'just now';
-  if (s < 3600) return Math.round(s / 60) + ' min ago';
-  if (s < 86400) return Math.round(s / 3600) + ' h ago';
-  if (s < 172800) return 'yesterday';
-  return Math.round(s / 86400) + ' d ago';
-}
-
 /** "00:05:00" or "14.00:00:00" as seconds. */
 function span(text) {
   const m = /^(?:(\d+)\.)?(\d+):(\d+):(\d+)/.exec(text || '');
@@ -200,8 +165,22 @@ function lastScanText(i) {
     + compact(i.last.newSamples) + ' new changes stored'
     + (i.last.backfilled ? ' plus ' + compact(i.last.backfilled) + ' read from Home Assistant\'s history' : '') + ', '
     + (i.last.raised ? i.last.raised + ' new finding' + (i.last.raised === 1 ? '' : 's') : 'nothing new')
+    + (i.last.routines ? ', ' + i.last.routines + ' routine' + (i.last.routines === 1 ? '' : 's') + ' offered' : '')
     + (i.last.resolved ? ', ' + i.last.resolved + ' closed by itself' : '')
     + ' · ' + compact(i.last.visible) + ' entities visible in Home Assistant.';
+}
+
+/** The last search for routines, so "nothing offered" comes with the reason. */
+function routinesText(i) {
+  const r = i.routines;
+  if (!r) return 'Routines are looked for once an hour; the first search has not run yet.';
+  if (r.learning === false) return 'Learning routines is turned off under Settings → Scan.';
+  if (r.skipped) return 'Routines were not looked for ' + spoken(-fromNow(r.atUtc)) + ' ago: ' + r.skipped;
+  return 'Routines: looked across ' + compact(r.entities) + ' entities ' + spoken(-fromNow(r.atUtc)) + ' ago; '
+    + (r.offered ? r.offered + ' on offer under Noticed' : 'none on offer yet')
+    + (r.automated ? ', ' + r.automated + ' already automated' : '')
+    + (r.machineMade ? ', ' + r.machineMade + ' done by a machine' : '')
+    + '. A routine needs at least ' + r.minimumTimes + ' occurrences on ' + r.minimumDays + ' different days.';
 }
 
 /** Writes only when the text actually changed, so a reader's selection survives the tick. */
@@ -277,14 +256,19 @@ function insightCard(i) {
     // than an edge one. The cap takes entities in id order, so it does not pick a sensible subset -- it picks
     // an alphabetical one. Saying so beats leaving someone to wonder why half their house is never mentioned.
     card.append(el('div', 'warn', 'Only ' + compact(i.last.observed) + ' of ' + compact(i.last.visible)
-      + ' entities are being watched: the maximum tracked entities cap has been reached, and entities are '
-      + 'taken in name order, so the rest are never looked at. Raise the cap under Settings → Watching, or '
-      + 'add Ignore globs to narrow what is watched.'));
+      + ' entities are being watched: the maximum tracked entities cap has been reached. The sun, and the '
+      + 'lights, switches, locks, covers, sensors and people a routine could be about, are kept first; then '
+      + 'readings; Home Assistant\'s own machinery last. The rest are never looked at. Raise the cap under '
+      + 'Settings → Watching, or add Ignore globs to narrow what is watched.'));
   }
 
   const scanned = el('div', i.last && i.last.error ? 'warn' : 'meta', lastScanText(i));
   scanned.id = 'last-scan';
   card.append(scanned);
+
+  const routines = el('div', 'meta', routinesText(i));
+  routines.id = 'routines-line';
+  card.append(routines);
 
   return card;
 }
@@ -316,99 +300,6 @@ function chips(label, values) {
     row.append(more);
   }
   return row;
-}
-
-let toastTimer = null;
-
-/** A short confirmation at the bottom of the viewport, for actions taken on cards far below the composer. */
-function toast(message, kind) {
-  let node = $('toast');
-  if (!node) { node = el('div', 'toast'); node.id = 'toast'; document.body.append(node); }
-  node.textContent = message;
-  node.className = 'toast show' + (kind === 'err' ? ' err' : '');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.classList.remove('show'), kind === 'err' ? 8000 : 4500);
-}
-
-/** Writes a line of feedback into a card, or clears it. */
-function tell(status, message, kind) {
-  status.textContent = message || '';
-  status.className = kind ? 'status ' + kind : 'status';
-}
-
-/** Seconds of waiting before the count appears, so a quick action does not flash a number. */
-const COUNT_AFTER = 2;
-
-/** And how long before the wait is worth explaining again, for the ones that go to a local model. */
-const PATIENCE_AFTER = 25;
-
-/**
- * Counts the seconds on a busy button, and says something once the wait gets long.
- *
- * A spinner says "working"; it does not say "getting somewhere". Drafting goes to a model that may be a 7B
- * on someone's CPU, so ten to sixty seconds of an unchanging label is normal — and is indistinguishable
- * from a wedged request, which is what it was reported as. A number that climbs is the whole difference:
- * it turns "is this broken?" into "it has been twelve seconds, and it said ten to sixty".
- *
- * Returns the function that stops it, which the caller must run however the handler ends.
- */
-function countUp(button, options, status) {
-  const spinner = el('span', 'spin');
-  const caption = document.createTextNode(options.busy);
-  button.replaceChildren(spinner, caption);
-
-  const started = Date.now();
-  let explained = false;
-
-  const tick = () => {
-    const seconds = Math.round((Date.now() - started) / 1000);
-    caption.textContent = seconds >= COUNT_AFTER ? options.busy + ' ' + seconds + 's' : options.busy;
-
-    if (!explained && status && options.patience && seconds >= PATIENCE_AFTER) {
-      explained = true;
-      tell(status, options.patience);
-    }
-  };
-
-  const timer = setInterval(tick, 500);
-  tick();
-
-  return () => clearInterval(timer);
-}
-
-/**
- * A button that disables itself while its handler runs. `busy` is the label to show meanwhile (with a
- * spinner and a running count); `patience` is what to say if the wait gets long; `status` is a card's own
- * status line, so an error lands next to the button that caused it.
- *
- * Every button on the same CARD is disabled for the duration, not just the ones beside it. A draft offers
- * three decisions about itself -- Create, Discard, Refine -- and they do not share a row: Refine sits in its
- * own, and it is the slow one, announcing a 10-60 second wait. While any of them is in flight the others are
- * still decisions about the same draft, and making two of them is how a live automation ended up recorded
- * as superseded with no id.
- */
-function action(label, handler, kind, options) {
-  const button = el('button', kind === true ? 'primary' : (kind || null), label);
-  button.type = 'button';
-  const status = options && options.status;
-  button.addEventListener('click', async () => {
-    const scope = button.closest('.card') || button.parentElement;
-    const siblings = scope ? [...scope.querySelectorAll('button')] : [button];
-    const held = siblings.filter((other) => !other.disabled);
-    held.forEach((other) => { other.disabled = true; });
-
-    const stopCounting = options && options.busy ? countUp(button, options, status) : null;
-    try {
-      await handler();
-    } catch (err) {
-      if (status) tell(status, err.message, 'err'); else toast(err.message, 'err');
-    } finally {
-      if (stopCounting) stopCounting();
-      held.forEach((other) => { other.disabled = false; });
-      button.textContent = label;
-    }
-  });
-  return button;
 }
 
 /** Scrolls a proposal card into view and outlines it, so "review it" has an obvious target. */
@@ -481,7 +372,7 @@ function proposalCard(p) {
   // The story above is derived from the same config; the YAML is there for anyone who wants the exact text.
   if (p.yaml) {
     const details = el('details');
-    details.append(el('summary', 'reveal', 'YAML'), el('pre', null, p.yaml));
+    details.append(el('summary', 'reveal', 'YAML'), codeBlock(p.yaml, 'the YAML'));
     card.append(details);
   }
 
@@ -494,11 +385,10 @@ function proposalCard(p) {
       action('Create in Home Assistant', async () => {
         await call('api/proposals/' + p.id + '/confirm', { method: 'POST', headers: headers(false) });
         toast('Created in Home Assistant: ' + (p.alias || 'automation') + '.');
-        await refresh(); reveal(p.id);
-      }, true, { busy: 'Creating…', patience: 'Still writing to Home Assistant. Do not press it again: this is the one step that changes your home.', status }),
+      }, true, { busy: 'Creating…', patience: 'Still writing to Home Assistant. Do not press it again: this is the one step that changes your home.', status, after: () => reveal(p.id) }),
       action('Discard', async () => {
         await call('api/proposals/' + p.id + '/reject', { method: 'POST', headers: headers(false) });
-        toast('Draft discarded.'); await refresh();
+        toast('Draft discarded.');
       }, 'quiet danger', { status }));
     card.append(row);
 
@@ -513,8 +403,8 @@ function proposalCard(p) {
       const refined = await call('api/proposals/' + p.id + '/refine',
         { method: 'POST', headers: headers(true), body: JSON.stringify({ feedback: text }) });
       toast('Refined. Review the new draft.');
-      await refresh(); reveal(refined.id);
-    }, false, { busy: 'Refining…', patience: 'Still going. A model running locally on a CPU can take a minute or more; it has not stalled.', status });
+      return refined;
+    }, false, { busy: 'Refining…', patience: 'Still going. A model running locally on a CPU can take a minute or more; it has not stalled.', status, after: (refined) => reveal(refined.id) });
     feedback.addEventListener('keydown', (event) => { if (event.key === 'Enter') { event.preventDefault(); refine.click(); } });
     refineRow.append(feedback, refine);
     card.append(refineRow, status);
@@ -533,14 +423,13 @@ function proposalCard(p) {
     row.append(p.dismissedUtc
       ? action('Show again', async () => {
           await call('api/proposals/' + p.id + '/restore', { method: 'POST', headers: headers(false) });
-          toast('Back in the list.'); await refresh();
+          toast('Back in the list.');
         }, 'small', { status })
       : action('Dismiss', async () => {
           await call('api/proposals/' + p.id + '/dismiss', { method: 'POST', headers: headers(false) });
           toast(p.status === 'Created'
             ? 'Hidden. The automation is still live in Home Assistant.'
             : 'Hidden.');
-          await refresh();
         }, 'quiet small', { status }));
 
     card.append(row, status);
@@ -555,10 +444,8 @@ function emptyState(title, text) {
   return node;
 }
 
-function render(container, items, build, empty) {
-  container.replaceChildren();
-  if (!items || !items.length) { container.append(empty); return; }
-  for (const item of items) container.append(build(item));
+function retextNode(node, text) {
+  if (node && node.textContent !== text) node.textContent = text;
 }
 
 function setCount(id, n, live) {
@@ -621,9 +508,17 @@ async function refresh() {
 
   const drafts = (proposals || []).filter((p) => p.status === 'Draft').length;
   setCount('proposal-count', showDismissed ? (proposals || []).length : drafts, drafts > 0);
-  render($('proposals'), proposals, proposalCard, showDismissed
+  const empty = showDismissed
     ? emptyState('Nothing here', 'No proposals, dismissed or otherwise.')
-    : emptyState('Nothing drafted yet', 'Describe an automation above, or make one from a finding under Noticed.'));
+    : emptyState('Nothing drafted yet', 'Describe an automation above, or make one from a finding under Noticed.');
+  reconcile($('proposals'), (proposals || []).length
+    ? proposals.map((p) => ({
+        key: p.id,
+        print: JSON.stringify(p),
+        build: () => proposalCard(p),
+        touch: (node) => retextNode(node.querySelector('.card-head .when'), ago(p.createdUtc)),
+      }))
+    : [{ key: 'empty', print: empty.textContent, build: () => empty }]);
 
   // A card named in the address bar, from the Noticed page or a shared link, is scrolled to and outlined.
   const wanted = /^#proposal-(\d+)$/.exec(location.hash);
@@ -648,6 +543,9 @@ function succeeded() {
   const banner = $('stale');
   if (banner) banner.hidden = true;
 }
+
+/** What a card action reloads once it is done. */
+function refreshPage() { return quietRefresh(); }
 
 function quietRefresh() {
   return refresh().then(() => {
@@ -709,7 +607,8 @@ $('scan').addEventListener('click', async () => {
   try {
     const report = await call('api/scan', { method: 'POST', headers: headers(false) });
     toast('Scanned ' + compact(report.observed) + ' watched entities: ' + compact(report.newSamples) + ' new changes recorded, '
-      + (report.raised ? report.raised + ' new finding' + (report.raised === 1 ? '' : 's') + '.' : 'nothing new.'));
+      + (report.raised ? report.raised + ' new finding' + (report.raised === 1 ? '' : 's') : 'nothing new')
+      + (report.routines ? ', ' + report.routines + ' routine' + (report.routines === 1 ? '' : 's') + ' offered.' : '.'));
     await refresh();
     succeeded();
   } catch (err) {

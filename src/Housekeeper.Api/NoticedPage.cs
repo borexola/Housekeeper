@@ -22,6 +22,7 @@ internal static class NoticedPage
   .card.kind-Unavailable { border-left-color: var(--kind-quiet); }
   .card.kind-MissingEntity { border-left-color: var(--kind-missing); }
   .card.kind-Concern { border-left-color: var(--kind-concern); }
+  .card.kind-Habit { border-left-color: var(--kind-habit); }
   .card.closed { opacity: .6; }
   .card.closed:hover { opacity: 1; }
   .concern-tag {
@@ -62,7 +63,7 @@ internal static class NoticedPage
 <main>
   <div id="stale" class="banner" hidden></div>
   <h1 class="title">Noticed</h1>
-  <p class="lead meta">What the scanner found, most pressing first: what you asked to watch for, then your own automations that no longer work, then anything held too long, out of range, or gone quiet. Nothing here notifies anyone; a finding waits until you act on it or it closes itself.</p>
+  <p class="lead meta">What the scanner found, most pressing first: what you asked to watch for, then your own automations that no longer work, then anything held too long, out of range, or gone quiet. Last come the routines it has learned from how you use the house — things you do by hand often enough that an automation could do them. Nothing here notifies anyone; a finding waits until you act on it or it closes itself.</p>
 
   <h2 class="section">Findings <span id="anomaly-count" class="count" hidden></span>
     <span class="tools"><span class="segmented" id="anomaly-filter"><button type="button" class="on" data-v="open">Open</button><button type="button" data-v="all">All</button></span></span>
@@ -76,49 +77,7 @@ const $ = (id) => document.getElementById(id);
 
 // ---- small words ----
 
-function compact(n) {
-  if (n === null || n === undefined) return '—';
-  if (n < 10000) return n.toLocaleString();
-  if (n < 1000000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
-  return (n / 1000000).toFixed(1).replace(/\.0$/, '') + 'M';
-}
-
-function spoken(seconds) {
-  const s = Math.abs(seconds);
-  if (s < 90) return Math.round(s) + ' seconds';
-  if (s < 5400) return Math.round(s / 60) + ' minutes';
-  if (s < 172800) return (s / 3600).toFixed(1) + ' hours';
-  return (s / 86400).toFixed(1) + ' days';
-}
-
-function fromNow(iso) { return iso ? (new Date(iso).getTime() - Date.now()) / 1000 : null; }
-
-function ago(iso) {
-  const s = -fromNow(iso);
-  if (s === null || isNaN(s)) return '';
-  if (s < 45) return 'just now';
-  if (s < 3600) return Math.round(s / 60) + ' min ago';
-  if (s < 86400) return Math.round(s / 3600) + ' h ago';
-  if (s < 172800) return 'yesterday';
-  return Math.round(s / 86400) + ' d ago';
-}
-
 function capitalise(text) { return text ? text.charAt(0).toUpperCase() + text.slice(1) : text; }
-
-function tell(status, message, kind) {
-  status.textContent = message || '';
-  status.className = kind ? 'status ' + kind : 'status';
-}
-
-let toastTimer = null;
-function toast(message, kind) {
-  let node = $('toast');
-  if (!node) { node = el('div', 'toast'); node.id = 'toast'; document.body.append(node); }
-  node.textContent = message;
-  node.className = 'toast show' + (kind === 'err' ? ' err' : '');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.classList.remove('show'), kind === 'err' ? 8000 : 4500);
-}
 
 const CHIPS_SHOWN = 6;
 function chips(label, values) {
@@ -137,48 +96,6 @@ function chips(label, values) {
     row.append(more);
   }
   return row;
-}
-
-const COUNT_AFTER = 2;
-const PATIENCE_AFTER = 25;
-
-function countUp(button, options, status) {
-  const spinner = el('span', 'spin');
-  const caption = document.createTextNode(options.busy);
-  button.replaceChildren(spinner, caption);
-  const started = Date.now();
-  let explained = false;
-  const tick = () => {
-    const seconds = Math.round((Date.now() - started) / 1000);
-    caption.textContent = seconds >= COUNT_AFTER ? options.busy + ' ' + seconds + 's' : options.busy;
-    if (!explained && status && options.patience && seconds >= PATIENCE_AFTER) { explained = true; tell(status, options.patience); }
-  };
-  const timer = setInterval(tick, 500);
-  tick();
-  return () => clearInterval(timer);
-}
-
-/** A button that disables every button on its card while its handler runs. See the dashboard for why. */
-function action(label, handler, kind, options) {
-  const button = el('button', kind === true ? 'primary' : (kind || null), label);
-  button.type = 'button';
-  const status = options && options.status;
-  button.addEventListener('click', async () => {
-    const scope = button.closest('.card') || button.parentElement;
-    const held = [...scope.querySelectorAll('button')].filter((other) => !other.disabled);
-    held.forEach((other) => { other.disabled = true; });
-    const stopCounting = options && options.busy ? countUp(button, options, status) : null;
-    try {
-      await handler();
-    } catch (err) {
-      if (status) tell(status, err.message, 'err'); else toast(err.message, 'err');
-    } finally {
-      if (stopCounting) stopCounting();
-      held.forEach((other) => { other.disabled = false; });
-      button.textContent = label;
-    }
-  });
-  return button;
 }
 
 /** A link to a proposal card on the dashboard, which is where drafts are reviewed and confirmed. */
@@ -227,10 +144,12 @@ function explain(a) {
     };
   }
 
+  if (a.kind === 'Habit' && e.what) return { what: e.what, was: e.what, why: e.why || '' };
+
   if (a.kind === 'NumericOutlier' && e.current != null && e.median != null) {
     const when = baselineWhen(e);
     return {
-      what: 'Reads ' + withUnit(e.current, e.unit) + '.',
+      what: 'Reads ' + withUnit(e.current, e.unit) + (e.excursion_seconds ? ', and has for ' + spoken(e.excursion_seconds) : '') + '.',
       was: 'Read ' + withUnit(e.current, e.unit) + '.',
       why: 'Well outside its usual range: ' + (when ? when + ' it' : 'it') + ' normally sits near ' + withUnit(e.median, e.unit)
         + ', judged over ' + e.samples + ' readings' + (e.baseline_seconds ? ' spanning ' + spoken(e.baseline_seconds) : '') + '.',
@@ -276,10 +195,15 @@ const KINDS = {
   StuckState: { title: 'Held far longer than usual', order: 2 },
   NumericOutlier: { title: 'Readings out of their range', order: 3 },
   Unavailable: { title: 'Gone quiet', order: 4 },
+  Habit: { title: 'Things you could automate', order: 5 },
 };
 
 function gaugeText(a) {
   if (a.kind === 'MissingEntity') return 'Needs fixing';
+  if (a.kind === 'Habit') {
+    const e = a.evidence || {};
+    return e.times ? 'Seen ' + e.times + ' times over ' + e.days + ' days' : '';
+  }
   const s = a.severity == null ? 1 : a.severity;
   const times = Math.round(Math.pow(2, s - 1));
   return times <= 1 ? 'Just over its usual' : 'About ' + times + '× its usual';
@@ -314,6 +238,14 @@ function anomalyCard(a, proposalsById) {
   card.append(el('div', 'why', words.why));
 
   if (a.status === 'Open' && a.kind !== 'Concern') card.append(el('div', 'gauge', gaugeText(a)));
+
+  // A finding the user has dismissed before came back only because it is further over its line; say so,
+  // and say what the next dismissal does.
+  if (a.status === 'Open' && evidence.dismissed_before) {
+    const n = evidence.dismissed_before;
+    card.append(el('div', 'meta', 'You dismissed this ' + (n === 1 ? 'once' : n === 2 ? 'twice' : n + ' times')
+      + ' before, and it has come back further over its line. ' + (n >= 2 ? 'One more dismissal silences it for good.' : 'A third dismissal would silence it for good.')));
+  }
   if (a.kind !== 'Concern' && evidence.concern) card.append(el('span', 'concern-tag', 'Concern: ' + evidence.concern));
 
   if (a.kind === 'MissingEntity' && evidence.missing && evidence.missing.length)
@@ -335,7 +267,9 @@ function anomalyCard(a, proposalsById) {
   if (a.status === 'Open') {
     card.append(el('div', 'suggestion', a.kind === 'MissingEntity'
       ? 'Re-drafting uses the original request against what exists now: "' + a.suggestedRequest + '"'
-      : 'An automation would ' + suggestionText(a)));
+      : a.kind === 'Habit'
+        ? 'The automation: "' + (evidence.spoken || a.suggestedRequest) + '"'
+        : 'An automation would ' + suggestionText(a)));
 
     const status = el('div', 'status');
     const row = el('div', 'row actions');
@@ -345,18 +279,19 @@ function anomalyCard(a, proposalsById) {
         const proposal = await call('api/anomalies/' + a.id + '/automate', { method: 'POST', headers: headers(false) });
         toast('Draft ready. Opening it on the dashboard to review and confirm.');
         location.href = 'dashboard#proposal-' + proposal.id;
-      }, true, { busy: 'Drafting…', patience: 'Still going. A model running locally on a CPU can take a minute or more; it has not stalled.', status }),
-      action('Dismiss', async () => {
-        await call('api/anomalies/' + a.id + '/dismiss', { method: 'POST', headers: headers(false) });
-        toast('Dismissed. It may come back if it is still unusual after the quiet period.'); await refresh();
+      }, true, { busy: 'Drafting…', patience: 'Still going. A model running locally on a CPU can take a minute or more; it has not stalled.', status, reload: false }),
+      action(a.kind === 'Habit' ? 'Not this one' : 'Dismiss', async () => {
+        const result = await call('api/anomalies/' + a.id + '/dismiss', { method: 'POST', headers: headers(false) });
+        toast(result.note || (a.kind === 'Habit'
+          ? 'Put away. This routine will not be suggested again.'
+          : 'Dismissed. It may come back if it is still unusual after the quiet period.'));
       }, 'quiet', { status }));
 
-    if (a.kind !== 'MissingEntity' && a.kind !== 'Concern') {
+    if (a.kind !== 'MissingEntity' && a.kind !== 'Concern' && a.kind !== 'Habit') {
       const ignore = async (scope) => {
         const result = await call('api/anomalies/' + a.id + '/ignore?scope=' + scope, { method: 'POST', headers: headers(false) });
         const what = scope === 'device' ? result.device + ' (' + result.ignored.length + ' entities)' : (name || a.entityId);
         toast('Ignoring ' + what + ' from now on. Undo under Settings → Scan → Ignore.');
-        await refresh();
       };
       const entity = action('Ignore entity', () => ignore('entity'), 'quiet', { status });
       entity.title = 'Stop watching ' + a.entityId + ' until you remove it from Settings → Scan → Ignore.';
@@ -379,9 +314,27 @@ function emptyState(title, text) {
   return node;
 }
 
-function renderFindings(container, items, proposalsById, empty) {
-  container.replaceChildren();
-  if (!items || !items.length) { container.append(empty); return; }
+/** One line under the routines, so "none" comes with the reason: not looked yet, looked and found none, or skipped. */
+function routinesNote(r) {
+  const node = el('div', 'meta');
+  node.style.marginTop = '10px';
+  if (!r) node.textContent = 'Routines are looked for once an hour, across the entities being watched; the first search has not run yet.';
+  else if (r.learning === false) node.textContent = 'Learning routines is turned off under Settings → Scan.';
+  else if (r.skipped) node.textContent = 'Routines were not looked for ' + spoken(-fromNow(r.atUtc)) + ' ago: ' + r.skipped;
+  else node.textContent = 'Routines: looked across ' + compact(r.entities) + ' entities ' + spoken(-fromNow(r.atUtc)) + ' ago; '
+    + (r.found ? r.found + ' held up' : 'none held up yet')
+    + (r.automated ? ', ' + r.automated + ' already automated' : '')
+    + (r.machineMade ? ', ' + r.machineMade + ' done by a machine' : '')
+    + '. A routine needs at least ' + r.minimumTimes + ' occurrences on ' + r.minimumDays + ' different days.';
+  return node;
+}
+
+function renderFindings(container, items, proposalsById, empty, routines) {
+  const note = { key: 'routines-note', print: JSON.stringify(routines || null), build: () => routinesNote(routines) };
+  if (!items || !items.length) {
+    reconcile(container, [{ key: 'empty', print: empty.textContent, build: () => empty }, note]);
+    return;
+  }
 
   const flagged = (a) => (a.evidence && a.evidence.concern ? 0 : 1);
   const sorted = [...items].sort((x, y) => flagged(x) - flagged(y));
@@ -393,13 +346,36 @@ function renderFindings(container, items, proposalsById, empty) {
   }
 
   const ordered = [...groups.keys()].sort((x, y) => ((KINDS[x] || {}).order ?? 9) - ((KINDS[y] || {}).order ?? 9));
+  const entries = [];
   for (const kind of ordered) {
     const list = groups.get(kind);
-    const heading = el('h3', 'kind kind-' + kind);
-    heading.append(document.createTextNode((KINDS[kind] || {}).title || kind), el('span', 'count', '· ' + list.length));
-    container.append(heading);
-    for (const a of list) container.append(anomalyCard(a, proposalsById));
+    entries.push({
+      key: 'kind-' + kind,
+      print: String(list.length),
+      build: () => {
+        const heading = el('h3', 'kind kind-' + kind);
+        heading.append(document.createTextNode((KINDS[kind] || {}).title || kind), el('span', 'count', '· ' + list.length));
+        return heading;
+      },
+    });
+    for (const a of list) {
+      // The card also shows the proposal it was turned into, or the one it says is broken, so a change to
+      // either of those has to redraw it too.
+      const linked = [proposalsById.get(a.proposalId), a.evidence && proposalsById.get(a.evidence.proposal_id)];
+      entries.push({
+        key: a.id,
+        print: JSON.stringify([a, linked]),
+        build: () => anomalyCard(a, proposalsById),
+        touch: (node) => {
+          const when = node.querySelector('.card-head .when');
+          const text = (a.status === 'Open' ? 'noticed ' : '') + ago(a.detectedUtc);
+          if (when && when.textContent !== text) when.textContent = text;
+        },
+      });
+    }
   }
+  entries.push(note);
+  reconcile(container, entries);
 }
 
 let showClosed = false;
@@ -412,7 +388,8 @@ async function refresh() {
   ]);
 
   const proposalsById = new Map((proposals || []).map((p) => [p.id, p]));
-  const open = (anomalies || []).filter((a) => a.status === 'Open').length;
+  // Routines are offers, not problems, so the count beside "Findings" leaves them out; their own heading counts them.
+  const open = (anomalies || []).filter((a) => a.status === 'Open' && a.kind !== 'Habit').length;
   const count = $('anomaly-count');
   count.hidden = !(showClosed ? (anomalies || []).length : open);
   count.textContent = String(showClosed ? (anomalies || []).length : open);
@@ -423,9 +400,13 @@ async function refresh() {
     ? emptyState('Nothing here', 'No findings, open or closed.')
     : ready === 0 || ready === null
       ? emptyState('Nothing yet', 'No entity has enough history to be judged against, so there is nothing to compare.')
-      : emptyState('All quiet', 'Nothing open across the ' + compact(ready) + ' entities with enough history to judge. Tell it what to watch for under Concerns.'));
+      : emptyState('All quiet', 'Nothing open across the ' + compact(ready) + ' entities with enough history to judge. Tell it what to watch for under Concerns.'),
+    insight ? insight.routines : null);
   navBadge();
 }
+
+/** What a card action reloads once it is done. */
+function refreshPage() { return quietRefresh(); }
 
 let refreshFailures = 0;
 let lastGood = null;

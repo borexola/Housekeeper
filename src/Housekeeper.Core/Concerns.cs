@@ -51,6 +51,17 @@ public sealed record Concern
     public string? Explanation { get; init; }
     /// <summary>True when a model chose the entities and the rule; false when they were matched by name alone.</summary>
     public bool Interpreted { get; init; }
+    /// <summary>
+    /// Why the model's reading is missing, when it is: not chosen, did not answer, could not be understood.
+    /// Kept apart from <see cref="Explanation"/> because they are different facts of different weight --
+    /// "watching ten entities" is what the concern does, and "the model was down" is a note about how well.
+    /// </summary>
+    public string? Note { get; init; }
+    /// <summary>
+    /// True while the model has not had its say and should be asked again: it was not configured, did not
+    /// answer, or answered unusably. False once it has read the concern, including when it named nothing.
+    /// </summary>
+    public bool Provisional { get; init; }
     public DateTimeOffset CreatedUtc { get; init; }
 }
 
@@ -98,6 +109,10 @@ public static class Concerns
         ["window"] = ([], ["window", "opening"]),
         ["garage"] = (["cover"], ["garage_door", "garage"]),
         ["lock"] = (["lock"], []),
+        ["locked"] = (["lock"], ["door", "lock"]),
+        ["unlocked"] = (["lock"], ["door", "lock"]),
+        ["unlock"] = (["lock"], ["door", "lock"]),
+        ["contact"] = ([], ["door", "window", "opening"]),
         ["leak"] = ([], ["moisture"]),
         ["water"] = ([], ["moisture"]),
         ["flood"] = ([], ["moisture"]),
@@ -126,6 +141,7 @@ public static class Concerns
     {
         "temperature", "temp", "heat", "cold", "hot", "humidity", "power", "energy", "consumption", "leak",
         "water", "flood", "battery", "batterie", "motion", "presence", "smoke", "co", "co2", "air", "pressure",
+        "locked", "unlocked", "unlock",
     };
 
     /// <summary>
@@ -135,7 +151,7 @@ public static class Concerns
     /// </summary>
     private static readonly HashSet<string> Generic = new(StringComparer.Ordinal)
     {
-        "light", "lamp", "switch", "plug", "door", "window", "lock", "camera", "fan", "vacuum", "tv", "alarm", "garage",
+        "light", "lamp", "switch", "plug", "door", "window", "lock", "camera", "fan", "vacuum", "tv", "alarm", "garage", "contact",
     };
 
     /// <summary>
@@ -192,6 +208,22 @@ public static class Concerns
         // Words that name a particular thing, as opposed to a kind of thing: "freezer", "hall", "dryer".
         var particular = new HashSet<string>(specific.Where(token => !Generic.Contains(token)), StringComparer.Ordinal);
 
+        // "A door left unlocked at night" used to match nothing: "unlocked" is in no entity's name, and a
+        // particular word that names nothing sank the whole concern. It is a kind word now -- the locks and
+        // the door sensors are what it means -- and abstract, so it is never looked for in a name. A
+        // particular word that really names nothing still matches nothing: "the attic light" in a house
+        // with no attic must not quietly become every light.
+        return Score(entities, domains, classes, specific, particular, max);
+    }
+
+    private static IReadOnlyList<string> Score(
+        IReadOnlyList<HaEntity> entities,
+        HashSet<string> domains,
+        HashSet<string> classes,
+        HashSet<string> specific,
+        HashSet<string> particular,
+        int max)
+    {
         List<(HaEntity Entity, int Score)> scored = [];
         foreach (var entity in entities)
         {
@@ -255,6 +287,10 @@ public static class Concerns
         RealtimeUpdates = options.RealtimeUpdates,
         RedetectAfter = options.RedetectAfter,
         BackfillFromRecorder = options.BackfillFromRecorder,
+        MinimumExcursion = options.MinimumExcursion,
+        LearnHabits = options.LearnHabits,
+        HabitMinimumTimes = options.HabitMinimumTimes,
+        HabitConfidence = options.HabitConfidence,
     };
 
     private static TimeSpan Scale(TimeSpan span) => TimeSpan.FromSeconds(Math.Max(60, span.TotalSeconds * Attention));

@@ -25,8 +25,10 @@ internal static class ConcernsPage
   .concern { border-left: 3px solid var(--kind-concern); }
   .concern .card-head h3 { font-size: 15px; }
   .concern .how { color: var(--ink-soft); font-size: 13.5px; margin-top: 2px; }
-  .concern .how.fallback { color: var(--warn-text); }
+  .concern .note { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
+  .concern .note a { color: var(--link); text-decoration: underline; }
   .concern .rule { display: inline-block; margin-top: 8px; padding: 2px 8px; border-radius: 4px; background: var(--tint-soft); color: var(--tint); font-size: 12px; font-weight: 500; }
+  .concern .rule .lbl { color: var(--muted); font-weight: 400; margin-right: 4px; }
   .concern .chips { margin-top: 8px; }
   .concern .row.actions { margin-top: 12px; }
 
@@ -84,19 +86,15 @@ const CHIPS_SHOWN = 8;
 
 function capitalise(text) { return text ? text.charAt(0).toUpperCase() + text.slice(1) : text; }
 
-function tell(status, message, kind) {
-  status.textContent = message || '';
-  status.className = kind ? 'status ' + kind : 'status';
-}
-
-let toastTimer = null;
-function toast(message, kind) {
-  let node = $('toast');
-  if (!node) { node = el('div', 'toast'); node.id = 'toast'; document.body.append(node); }
-  node.textContent = message;
-  node.className = 'toast show' + (kind === 'err' ? ' err' : '');
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => node.classList.remove('show'), kind === 'err' ? 8000 : 4500);
+/** A note about the model, with "Settings → Model" as a real link to the settings page. */
+function noteLine(text) {
+  const node = el('div', 'note');
+  const parts = text.split('Settings → Model');
+  parts.forEach((part, i) => {
+    if (i > 0) { const link = el('a', null, 'Settings → Model'); link.href = 'settings'; node.append(link); }
+    node.append(document.createTextNode(part));
+  });
+  return node;
 }
 
 function chips(label, values) {
@@ -119,41 +117,47 @@ function chips(label, values) {
 
 function concernCard(c) {
   const card = el('div', 'card concern');
+  card.id = 'concern-' + c.id;
   const head = el('div', 'card-head');
   head.append(el('h3', null, c.text));
-  const when = el('span', 'when', new Date(c.createdUtc).toLocaleString());
+  const when = el('span', 'when', ago(c.createdUtc));
+  when.title = new Date(c.createdUtc).toLocaleString();
   head.append(when);
   card.append(head);
 
-  // A concern the model could not read is flagged, because the fix is usually on the settings page and
-  // "matched by name" on its own reads as a choice rather than a fallback.
-  card.append(el('div', 'how' + (c.interpreted ? '' : ' fallback'), c.explanation || (c.interpreted ? 'Read by the model.' : 'Matched by name.')));
-  if (c.rule) card.append(el('span', 'rule', capitalise(c.rule)));
+  // What the concern does, and separately why the model's reading is missing when it is. One orange line
+  // for both painted a concern watching ten entities as broken because the model happened to be down.
+  card.append(el('div', 'how', c.explanation || (c.interpreted ? 'Read by the model.' : 'Matched by name.')));
+  if (c.hasRule) {
+    const rule = el('span', 'rule');
+    rule.append(el('span', 'lbl', 'Alert when it'), document.createTextNode(' ' + c.rule));
+    card.append(rule);
+  }
 
   if (c.names && c.names.length) card.append(chips('Watching', c.names));
-  else card.append(el('div', 'meta', 'Nothing is being watched for this yet. Remove it and try naming the room or the device.'));
+  else card.append(el('div', 'meta', c.provisional
+    ? 'Nothing is being watched for this yet. It will be read again once the model answers, or press Read again.'
+    : 'Nothing is being watched for this yet. Try wording it with the room or the device, then remove this one.'));
+
+  if (c.note) card.append(noteLine(c.note));
 
   const status = el('div', 'status');
   const row = el('div', 'row actions');
-  const remove = el('button', 'quiet small', 'Remove');
-  remove.type = 'button';
-  remove.addEventListener('click', async () => {
-    remove.disabled = true;
-    try {
-      await call('api/concerns/' + c.id, { method: 'DELETE', headers: headers(false) });
-      toast('Removed. Anything it raised closes on the next scan.');
-      await load();
-    } catch (err) {
-      tell(status, err.message, 'err');
-      remove.disabled = false;
-    }
-  });
-  row.append(remove);
+  if (c.provisional) {
+    row.append(action('Read again', async () => {
+      const read = await call('api/concerns/' + c.id + '/reread', { method: 'POST', headers: headers(false) });
+      toast(read.provisional ? 'Still could not be read by the model; matched by name for now.' : 'Read by the model.', read.provisional ? 'err' : null);
+    }, 'small', { status, busy: 'Reading…', patience: 'Still asking the model. A model running locally on a CPU can take a minute or more; it has not stalled.' }));
+  }
+  row.append(action('Remove', async () => {
+    await call('api/concerns/' + c.id, { method: 'DELETE', headers: headers(false) });
+    toast('Removed. Anything it raised closes on the next scan.');
+  }, 'quiet small', { status }));
   card.append(row, status);
   return card;
 }
 
-async function load() {
+async function load(quiet) {
   try {
     const list = await call('api/concerns', { headers: headers(false) }) || [];
     const count = $('concern-count');
@@ -161,22 +165,35 @@ async function load() {
     count.textContent = String(list.length);
 
     const box = $('concerns');
-    box.replaceChildren();
     if (!list.length) {
       const empty = el('div', 'empty');
       empty.append(el('strong', null, 'Nothing yet'), document.createTextNode('Add a worry above, or pick one of the examples.'));
-      box.append(empty);
+      reconcile(box, [{ key: 'empty', print: empty.textContent, build: () => empty }]);
     } else {
-      for (const c of list) box.append(concernCard(c));
+      reconcile(box, list.map((c) => ({
+        key: c.id,
+        print: JSON.stringify(c),
+        build: () => concernCard(c),
+        touch: (node) => { const when = node.querySelector('.card-head .when'); const text = ago(c.createdUtc); if (when && when.textContent !== text) when.textContent = text; },
+      })));
     }
 
     // A preset already added is no longer a suggestion.
     const have = new Set(list.map((c) => c.text.trim().toLowerCase()));
     for (const chip of $('presets').querySelectorAll('button')) chip.hidden = have.has(chip.textContent.trim().toLowerCase());
   } catch (err) {
-    $('concerns').replaceChildren(el('div', 'empty', err.message));
+    // A blip must not wipe what is showing. Only when nothing has loaded yet is the error the content.
+    const box = $('concerns');
+    if (!box.querySelector('[data-key]')) box.replaceChildren(el('div', 'empty', err.message));
+    else if (!quiet) toast('Could not refresh concerns: ' + err.message, 'err');
   }
 }
+
+/** Background refresh: picks up what the scan's tick has read since, and keeps the "ago" text honest. */
+function quietLoad() { return load(true); }
+
+/** What a card action reloads once it is done. */
+function refreshPage() { return load(); }
 
 async function add(text) {
   text = (text || '').trim();
@@ -200,9 +217,10 @@ async function add(text) {
     const concern = await call('api/concerns', { method: 'POST', headers: headers(true), body: JSON.stringify({ text }) });
     $('concern-text').value = '';
     const n = concern.names ? concern.names.length : 0;
-    tell(status, n
-      ? 'Watching ' + n + (n === 1 ? ' entity' : ' entities') + ' for this from the next scan.'
-      : 'Saved, but nothing in Home Assistant matched it yet. Try naming the room or the device.', n ? 'ok' : 'err');
+    const watching = n ? 'Watching ' + n + (n === 1 ? ' entity' : ' entities') + ' for this from the next scan.' : '';
+    tell(status, concern.provisional
+      ? (watching || 'Saved, but nothing matched it by name yet.') + ' The model could not read it and will be asked again.'
+      : n ? watching : 'Saved, but nothing in Home Assistant matched it. Try naming the room or the device.', n ? 'ok' : 'err');
     await load();
   } catch (err) {
     tell(status, err.message, 'err');
@@ -223,6 +241,8 @@ for (const preset of PRESETS) {
 }
 
 load();
+setInterval(quietLoad, 30000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') quietLoad(); });
 </script>
 </body>
 </html>

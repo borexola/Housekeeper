@@ -68,6 +68,11 @@ public sealed class FakeHomeAssistant : IHomeAssistant
     }
 
     public Task<bool> PingAsync(CancellationToken cancellationToken) => Task.FromResult(Reachable);
+
+    /// <summary>Home Assistant's configured zone. Null is a config that could not be read.</summary>
+    public string? TimeZone { get; set; } = "UTC";
+
+    public Task<string?> GetTimeZoneAsync(CancellationToken cancellationToken) => Task.FromResult(TimeZone);
 }
 
 public sealed class FakeLlm : ILlmClient
@@ -92,6 +97,9 @@ public sealed class FakeLlm : ILlmClient
     {
         foreach (var response in responses) _queued.Enqueue(response);
     }
+
+    /// <summary>Drops whatever earlier tests queued, so a shared fake answers only what this test set.</summary>
+    public void Clear() => _queued.Clear();
 
     /// <summary>Held open to keep a draft in flight, so something else can be raced against the model call.</summary>
     public TaskCompletionSource? Gate { get; set; }
@@ -259,6 +267,7 @@ public sealed class GatedStore(IStore inner) : IStore
     public Task<IReadOnlyDictionary<string, IReadOnlyList<StateSample>>> GetSamplesAsync(DateTimeOffset sinceUtc, int perEntity, CancellationToken cancellationToken) => inner.GetSamplesAsync(sinceUtc, perEntity, cancellationToken);
     public Task<IReadOnlyDictionary<string, IReadOnlyList<StateSample>>> GetNumericHistoryAsync(DateTimeOffset sinceUtc, int perBucket, int perEntity, CancellationToken cancellationToken) => inner.GetNumericHistoryAsync(sinceUtc, perBucket, perEntity, cancellationToken);
     public Task<int> PruneSamplesAsync(DateTimeOffset beforeUtc, CancellationToken cancellationToken) => inner.PruneSamplesAsync(beforeUtc, cancellationToken);
+    public Task<IReadOnlyDictionary<string, IReadOnlyList<StateSample>>> GetSamplesForAsync(IReadOnlyCollection<string> entityIds, DateTimeOffset sinceUtc, int maxPerEntity, CancellationToken cancellationToken) => inner.GetSamplesForAsync(entityIds, sinceUtc, maxPerEntity, cancellationToken);
     public Task<IReadOnlyList<(string EntityId, StateSample Sample)>> ListRecentSamplesAsync(string? entityContains, int limit, CancellationToken cancellationToken) => inner.ListRecentSamplesAsync(entityContains, limit, cancellationToken);
     public Task<HistorySummary> GetHistorySummaryAsync(DateTimeOffset sinceUtc, CancellationToken cancellationToken) => inner.GetHistorySummaryAsync(sinceUtc, cancellationToken);
     public Task<Anomaly> UpsertAnomalyAsync(Anomaly anomaly, CancellationToken cancellationToken) => inner.UpsertAnomalyAsync(anomaly, cancellationToken);
@@ -270,5 +279,6 @@ public sealed class GatedStore(IStore inner) : IStore
     public Task<Concern> AddConcernAsync(Concern concern, CancellationToken cancellationToken) => inner.AddConcernAsync(concern, cancellationToken);
     public Task<IReadOnlyList<Concern>> ListConcernsAsync(CancellationToken cancellationToken) => inner.ListConcernsAsync(cancellationToken);
     public Task<Concern?> GetConcernAsync(long id, CancellationToken cancellationToken) => inner.GetConcernAsync(id, cancellationToken);
+    public Task UpdateConcernAsync(Concern concern, CancellationToken cancellationToken) => inner.UpdateConcernAsync(concern, cancellationToken);
     public Task<bool> DeleteConcernAsync(long id, CancellationToken cancellationToken) => inner.DeleteConcernAsync(id, cancellationToken);
 }

@@ -6,6 +6,93 @@ All notable changes to Housekeeper are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Routines. Once an hour the scanner reads weeks of stored transitions and looks for things you do by hand
+  regularly enough that an automation could do them: a light that follows a motion sensor, a door, or a
+  person arriving, under whichever condition makes it reliable (always, after dark, weekdays, a band of the
+  day), and things done at about the same time most days. Each is a finding of the new kind `Habit`, listed
+  last on the Noticed page under "Things you could automate" with a one-click draft, said in your own
+  entities with the numbers behind it. A cue from another room needs twice the evidence, only the strongest
+  cue is offered per thing, a light that is also a switch is one thing, whatever an existing automation
+  already does is left out, and a routine you put away is never suggested again. The top three also lead
+  the composer's example requests. `Scan.LearnHabits`, `Scan.HabitMinimumTimes` and
+  `Scan.HabitConfidence` tune it. The house's time zone is read from Home Assistant so "about 06:45" is
+  the house's 06:45.
+- `GET /api/anomalies/summary` reports routines apart, as `habits`; `open` and `serious` count problems
+  only, so the menu badge means "something is wrong". `GET /api/insight` reports the last search for
+  routines (`routines`: when, over how many entities, how many held up, are on offer, were already
+  automated, were machine-made, or why it was skipped) and the scan report's `routines` count, and the
+  dashboard and Noticed page say so, so "none yet" comes with the reason.
+- Dismissals teach the detectors. A finding remembers how many times you dismissed it (`dismissals` on
+  every anomaly, `POST /api/anomalies/{id}/dismiss` answers with the count and what it did); after the quiet
+  period it comes back only if it is further past its bar, half a doubling per dismissal, and the third
+  dismissal silences it for good. Neither a silenced finding nor a put-away routine is ever pruned.
+- The watch-list cap keeps what the house can learn from. When `Scan.MaxTrackedEntities` binds, the sun and
+  the entities a routine could be about — lights, switches, covers, locks, fans, media players, motion and
+  door sensors, people — are kept first, then readings, then Home Assistant's own machinery. Taken in id
+  order, a 3,400-entity house filled its 500 slots with `automation.*`, `binary_sensor.*` and `button.*`
+  and never recorded a light. `sun.sun` is always watched when Home Assistant reports it.
+- Existing automations are recognised by the areas and devices they target and by the entity ids in their
+  blueprint inputs, not only by `entity_id` keys, so an editor-built "turn off the living room at eleven" is
+  seen to cover the living room's lights.
+- A Copy button on the YAML of every proposal. It uses the clipboard API where the page is allowed to,
+  and falls back to select-and-copy where it is not, such as Home Assistant reached over plain http.
+
+### Changed
+- A numeric reading has to stay out of its range for `Scan.MinimumExcursion` (ten minutes) before it is a
+  finding, dated from the stored readings in between. One reading is a kettle, a microwave, a TV switching
+  on or a sensor glitch, and every such spike was a card that opened on one scan and closed on the next: a
+  real house watched its Noticed page go from seven findings to three between two refreshes. A sensor that
+  reports rarely counts from its last change, so a thermometer stuck high is not made to wait. The card now
+  says how long the reading has been out. Two spikes with a normal reading between them are two spikes, not
+  one excursion, and a chatty sensor's fresh spike is never dated to an excursion hours earlier. Closing
+  needs the same evidence in reverse: back inside the range and stayed there for the wait, so one poll that
+  happened to read normal cannot close a card that the next poll would reopen as new.
+- The routine miner learned from review: a clock routine has to beat what random switching would produce
+  for a window chosen after the fact; a response within seconds to the second, or the same minute every
+  day, is an automation Housekeeper cannot see and is set aside rather than offered; every cue transition
+  inside the window counts, so a motion sensor that clears before the light goes on is still the cue for
+  movement; a cue with more history than its effect is not drowned in misses from before the effect
+  existed; a weekday routine still needs the full number of occurrences after narrowing; the last band of
+  the day ends at midnight, not 24:00; a person is "Sam", not "the Sam"; "after dark" asks the drafter for
+  "when it is dark", which spans sunset to sunrise as counted, and the drafting prompt now shows the shapes
+  for that, for daylight, and for weekdays and weekends. The search returns everything that held up and the
+  scanner applies the cap with the user's put-aways in hand, so a put-away routine takes no slot and a
+  routine past the cap is never closed as "not held up"; a promoted routine closes once its automation
+  exists; one whose effect or cue leaves the watch list closes saying so; and a scan on which Home
+  Assistant lists no automations, on a house that had them, waits rather than re-offering everything they do.
+  Local times are precomputed once per transition, so the hourly search stays well under a second on a
+  large house.
+- The pages share one `action()` helper: every card button holds its card against the background refresh,
+  reloads the list once the hold is off, and only then reveals what it made, so a confirmed draft no longer
+  flashes its old state. The Concerns page refreshes every thirty seconds like the others, and a blip never
+  wipes the list. The Copy button restores keyboard focus after copying and announces "Copied" to screen
+  readers.
+
+### Fixed
+- Concerns the model could not read are no longer stuck that way. Such a concern is saved matched by name
+  and marked provisional, the scan's tick asks the model again until it answers, and the card offers
+  **Read again** instead of telling you to remove it and retype. What was matched and why the model is
+  missing are now two lines rather than one orange sentence, "Settings → Model" is a link, the rule label
+  says what it is and is dropped when there is none, times read like the other pages, and the cards keep
+  their state across refreshes. "The OpenAI (server's loaded model) endpoint" is now the server's address.
+- "A door left unlocked at night" matched nothing, because "unlocked" is in no entity's name and a word
+  that names nothing used to sink the whole concern. "Locked", "unlocked" and "contact" are kind words now
+  — locks, door and contact sensors — and never looked for in a name. A particular name that matches
+  nothing still matches nothing: "the attic light" in a house with no attic does not become every light.
+- A concern the model has already read keeps that reading when the model cannot be asked again, so a Read
+  again pressed while the model is down does not trade a rule for a name match. The scan's tick asks the
+  model about pending concerns one at a time, never-tried first, with a backoff that doubles per failed try
+  and stops after three unusable answers, so one concern the model cannot read neither starves the rest nor
+  costs a call per tick. A Read again and the tick cannot read the same concern at once.
+- A failed read of Home Assistant's time zone is no longer held for six hours, during which every routine
+  was worked out in the container's zone rather than the house's.
+- The dashboard and Noticed pages no longer undo what you were doing every thirty seconds. The background
+  refresh rebuilt every card from scratch, which closed an opened YAML section, wiped a half-typed
+  refinement, dropped focus, and could detach a button whose action was still running. Cards are now
+  reused when their data has not changed, carry over open sections, typed text, and focus when it has, and
+  are left alone while an action on them is in flight.
+
 ### Changed
 - Renamed from HearthSense to Housekeeper. The environment prefix is now `HOUSEKEEPER__`, the token
   variables are `HOUSEKEEPER_API_TOKEN`, `HOUSEKEEPER_HA_TOKEN` and `HOUSEKEEPER_LLM_API_KEY`, the

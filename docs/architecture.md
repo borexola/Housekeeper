@@ -109,7 +109,7 @@ Three detectors, all pure functions over `(entity, history, options, now)`:
 | Detector | Fires when |
 |---|---|
 | `StuckState` | Current state has been held longer than `StuckMultiplier` × the longest it ever was before, and past a floor. The freezer door. When enough previous periods began in the same four-hour band of the day, only those are the baseline, so a door that is open for an hour at dinner and seconds at breakfast is judged against the right normal. Once the history reaches back three weeks, the same part of the week — weekday or weekend, in the house's own time zone — narrows it again, so a Saturday morning's hour-long opening does not set the bar for a Wednesday. |
-| `NumericOutlier` | Robust z-score (MAD × 1.4826) past `OutlierThreshold`, against the same time of day and, past three weeks, the same part of the week when those slices are baselines of their own. Falls back to standard deviation, then stays silent, rather than dividing by a flat history. |
+| `NumericOutlier` | Robust z-score (MAD × 1.4826) past `OutlierThreshold`, against the same time of day and, past three weeks, the same part of the week when those slices are baselines of their own. Falls back to standard deviation, then stays silent, rather than dividing by a flat history. And the reading has to have stayed out for `MinimumExcursion`, dated from the stored readings in between: one reading is a kettle, and every kettle used to be a card that opened on one scan and closed on the next. A brief dip does not end the run, but a normal reading more than a fifth of the wait before the next reading out does, so two kettles ten minutes apart are two kettles. Closing needs the same evidence in reverse — back inside the range and stayed there for the wait — so one poll that happened to read normal cannot close a card that the next poll would reopen. |
 | `Unavailable` | `unavailable`/`unknown` past a floor, on a sensor that was healthy ≥90% of its history. |
 | `MissingEntity` | An automation Housekeeper created references an entity id Home Assistant no longer reports. Not a detector over history: each scan checks every `Created` proposal against the live entity list. Promoting it re-drafts the original sentence against what exists now. |
 
@@ -131,7 +131,11 @@ from one in every scan. The entities it names are judged with every bar lowered 
 (`Concerns.Evaluate`), raising a `Concern` finding above everything else when it fires. A concern finding
 closes when the entity was looked at and the rule did not fire, or when the concern is removed.
 
-The model's part is the reading, done once when the concern is added and never during a scan.
+The model's part is the reading, done when the concern is added and never during a scan. When the model
+could not be asked — not chosen, down, or answering unusably — the concern is saved matched by name and
+marked provisional, with the reason kept apart from what was matched, and the scan's tick asks the model
+again, one concern at a time, until it has had its say; a **Read again** button does the same on demand. A
+model that read the concern and named nothing is an answer, not a wait.
 [`ConcernService`](../src/Housekeeper.Core/ConcernService.cs) shows it the concern and a shortlist of the
 house and asks for entity ids, a kind and a value; only ids that exist survive, exactly as with a draft. If
 the model is not configured or does not answer, `Concerns.Match` stands in — the concern's words against
@@ -189,6 +193,70 @@ so. `GET /api/insight` reports what is watched, how many changes are held, how m
 them to be judged against `MinimumSamples`, and what the last scan did — including a scan that threw, which
 would otherwise look identical to a quiet one. The dashboard renders it as four figures and a meter, so
 "nothing found" comes with the reason: most entities have not changed often enough yet.
+
+### Routines
+
+The detectors say when the house is doing something unusual. [`Habits`](../src/Housekeeper.Core/Habits.cs)
+is the other half of watching a house: noticing what the people in it do the same way every day, and
+offering to take it over. Once an hour the scanner reads weeks of transitions for every light, switch, fan,
+cover, lock, media player and vacuum, and for everything that could cue one — motion, occupancy, doors,
+people arriving and leaving, and other things being switched — and looks for two shapes.
+
+A *cue*: within three minutes of the pantry motion sensor firing, the pantry light goes on, nearly every
+time. The bar is three-sided — how many times, on how many different days, and how reliably, where reliably
+means the share of the times the cue happened *with the light still off* that the light followed. Motion
+while the light is already on asks nothing of anyone, so it is neither a hit nor a miss. Each routine is
+tried under a set of conditions, from the plainest to the most particular — always; after dark or in
+daylight, read from `sun.sun`'s stored state; weekdays or weekends; a four-hour band of the day — and
+offered under the plainest one that makes it reliable, because the plainer the condition, the simpler the
+automation. A *clock*: the porch light goes off at about ten past eleven on most days, or most weekdays,
+or most weekend days, with "every day" claimed only when both halves of the week carry it.
+
+Several rules came from running it over a real house and from review. A cue in another room, or in no
+known room, has to clear a higher bar — twice the occasions, more days, a higher share — because "the kids'
+room motion sensor fires and the pantry light goes off" is somebody walking through the house, not a
+routine; a person arriving or leaving is exempt, since a person is wherever they are. Only the strongest cue
+is offered for any one thing, because four sensors that all see the same person leave the same room are
+four views of one routine; among equals, a cue that is something starting (movement seen, a door opened)
+beats its ending, so a motion sensor that clears ten seconds after it fired is not read as the cue. Every
+cue transition inside the window counts, not only the last one. A light that is also a switch — two entity
+ids that change as one — is one thing, kept under the id that says what it is. A clock routine has to beat
+what random switching would produce for a window chosen after the fact — four standard deviations and
+twice the expectation clear of it — because the busiest hour of a light used twenty times a day at random
+still holds an event on most days. And a routine with machine punctuality — a response within five seconds
+to the second, or the same minute every day — is an automation Housekeeper cannot see (a device trigger, a
+timer) rather than a person, and is set aside and counted rather than offered. A cue with weeks more history
+than its effect is not drowned in misses from before the effect existed: a moment when the effect's state
+is unknown asks nothing of anyone.
+
+Whatever an existing automation already does is left out: a routine whose cue and effect both appear in an
+automation with a state trigger, or whose effect appears in one with a time or sun trigger, is reported
+back as already automated rather than offered, and an open or promoted offer closes with that reason the
+hour after the user builds it. An automation's reach includes the entities in the areas and on the devices
+it targets and the entity ids inside its blueprint inputs (`AutomationInspector`), since editor-built
+automations rarely name entities directly. A scan on which Home Assistant lists no automations at all, on a
+house that had them, is a restart in progress rather than a house that deleted them, and the search waits.
+
+A routine is raised as a finding of kind `Habit` — same triage, same one-click draft through the normal
+pipeline, its `SuggestedRequest` written in the entity ids the drafter resolves — but listed apart, never
+counted as serious, and never re-offered once put away: the dismissal row is never pruned. The search
+returns everything that held up and the scanner applies the cap of thirty with the user's own put-aways in
+hand, so a put-away routine takes no slot and a routine past the cap is never closed as "not held up". A
+routine whose effect or cue leaves the watch list closes saying so. The top three also lead the composer's
+examples, so the first thing a new user is offered to draft is something they have already shown they
+want, and the dashboard and the Noticed page say when the last search ran, over how many entities, and
+what it found, so "none yet" comes with the reason. Local times come from Home Assistant's own time zone,
+read from `/api/config` and never cached on a failed read, because the container is pinned to UTC and
+"about a quarter to seven" is not a UTC fact.
+
+### Dismissals teach the detectors
+
+A finding remembers how many times the user dismissed it. After the quiet period, the same finding comes
+back only if it is further past its bar — half a doubling of severity per dismissal — and the third
+dismissal silences it for good; the row is never pruned, so the silence holds. The card says when a finding
+has come back over a raised bar, and what the next dismissal does. This is the cheapest honest form of
+"learning from the user": the detector does not change its idea of normal, it changes how sure it has to
+be before it interrupts again.
 
 ## Configuration is state, not startup arguments
 

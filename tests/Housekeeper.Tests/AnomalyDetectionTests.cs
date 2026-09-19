@@ -7,7 +7,8 @@ public class AnomalyDetectionTests
 {
     private static readonly DateTimeOffset Now = new(2026, 3, 1, 12, 0, 0, TimeSpan.Zero);
 
-    private static ScanOptions Options => new();
+    /// <summary>The range gates alone: the readings here are dated a minute or two ago, and how long a reading has stayed out is tested on its own.</summary>
+    private static ScanOptions Options => new() { MinimumExcursion = TimeSpan.Zero };
 
     /// <summary>
     /// A freezer door that normally opens for under a minute has now been open for a quarter of an hour.

@@ -42,19 +42,27 @@ public sealed record AnomalyView(
     DateTimeOffset DetectedUtc,
     DateTimeOffset? DecidedUtc,
     /// <summary>How far past its own bar: 1 at the bar, one more per doubling, capped; missing-entity findings sit above the cap.</summary>
-    double Severity);
+    double Severity,
+    /// <summary>How many times the user has dismissed it. Each raises the bar it must clear to return; three silence it.</summary>
+    int Dismissals);
 
 public sealed record ConcernRequest(string? Text);
 
 /// <param name="Names">The friendly name of each watched entity, in the same order, so the card need not translate ids.</param>
+/// <param name="HasRule">False when the rule is only "pay closer attention", which is not worth a label.</param>
+/// <param name="Note">Why the model's reading is missing, if it is. Null when the model read it.</param>
+/// <param name="Provisional">True while the model has not had its say and will be asked again.</param>
 public sealed record ConcernView(
     long Id,
     string Text,
     IReadOnlyList<string> Entities,
     IReadOnlyList<string> Names,
     string Rule,
+    bool HasRule,
     string? Explanation,
     bool Interpreted,
+    string? Note,
+    bool Provisional,
     DateTimeOffset CreatedUtc);
 
 public static class Endpoints
@@ -125,29 +133,56 @@ public static class Endpoints
                     resolved = last.Report?.Resolved,
                     judged = last.Report?.Judged,
                     backfilled = last.Report?.Backfilled,
+                    routines = last.Report?.Routines,
                     error = last.Error,
                 },
                 nextUtc = scan.Enabled ? scanner.NextUtc : null,
+                // The last search for routines, so the page can say it is happening and why there are none yet.
+                routines = scanner.LastRoutineSearch is not { } search ? null : new
+                {
+                    atUtc = search.AtUtc,
+                    entities = search.Entities,
+                    found = search.Found,
+                    offered = search.Offered,
+                    automated = search.Automated,
+                    machineMade = search.MachineMade,
+                    skipped = search.Skipped,
+                    learning = scan.LearnHabits,
+                    minimumTimes = scan.HabitMinimumTimes,
+                    minimumDays = Habits.MinimumDays,
+                },
             });
         })
-        .WithSummary("What the scanner is watching, what history it holds, and what its last run did.");
+        .WithSummary("What the scanner is watching, what history it holds, what its last run did, and what its last search for routines found.");
 
         api.MapGet("/suggestions", async (
             IHomeAssistant homeAssistant,
+            IStore store,
             ILogger<NameBook> logger,
             CancellationToken cancellationToken) =>
         {
+            // What the house's own history says the user does by hand comes first: it is a request that
+            // would work here AND one they have already shown they want. The generic examples fill in.
+            var routines = (await store.ListAnomaliesAsync(AnomalyStatus.Open, 200, includeClosed: false, cancellationToken).ConfigureAwait(false))
+                .Where(anomaly => anomaly.Kind == AnomalyKind.Habit)
+                .OrderByDescending(anomaly => anomaly.Severity)
+                .Select(anomaly => Node(anomaly.EvidenceJson)?["spoken"]?.GetValue<string>())
+                .Where(spoken => !string.IsNullOrWhiteSpace(spoken))
+                .Take(3)
+                .ToList();
+
             // A nicety, never an error: a Home Assistant that is down or not yet configured leaves the box
             // with its placeholder, and the dashboard already says why drafting will not work.
             try
             {
                 var entities = await homeAssistant.GetEntitiesAsync(cancellationToken).ConfigureAwait(false);
-                return Results.Ok(new { suggestions = Suggestions.For(entities) });
+                return Results.Ok(new { suggestions = routines.Concat(Suggestions.For(entities)).Distinct(StringComparer.Ordinal).Take(8) });
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
+                // The routines are the house's own and need nothing from Home Assistant to be offered.
                 logger.LogDebug(ex, "Could not read entities for suggestions.");
-                return Results.Ok(new { suggestions = Array.Empty<string>() });
+                return Results.Ok(new { suggestions = routines });
             }
         })
         .WithSummary("Example requests written from the entities this house actually has.");
@@ -251,6 +286,13 @@ public static class Endpoints
             return Results.Ok(View(concern, names));
         })
         .WithSummary("Adds a concern. The model reads it into entities and a rule where it can; otherwise it is matched by name.");
+
+        api.MapPost("/concerns/{id:long}/reread", async (long id, ConcernService concerns, NameBook names, CancellationToken cancellationToken) =>
+        {
+            var concern = await concerns.ReadAgainAsync(id, cancellationToken).ConfigureAwait(false);
+            return concern is null ? Results.NotFound(new { error = "Concern not found." }) : Results.Ok(View(concern, names));
+        })
+        .WithSummary("Asks the model to read a concern again, for one it could not read when it was added.");
 
         api.MapDelete("/concerns/{id:long}", async (long id, ConcernService concerns, CancellationToken cancellationToken) =>
             await concerns.RemoveAsync(id, cancellationToken).ConfigureAwait(false)
@@ -387,9 +429,17 @@ public static class Endpoints
         api.MapGet("/anomalies/summary", async (IStore store, CancellationToken cancellationToken) =>
         {
             var open = await store.ListAnomaliesAsync(AnomalyStatus.Open, 1000, includeClosed: false, cancellationToken).ConfigureAwait(false);
-            return Results.Ok(new { open = open.Count, serious = open.Count(IsSerious) });
+
+            // A routine is an offer, not a problem; it is counted apart so the badge means "something is
+            // wrong" and nothing else.
+            return Results.Ok(new
+            {
+                open = open.Count(anomaly => anomaly.Kind != AnomalyKind.Habit),
+                serious = open.Count(IsSerious),
+                habits = open.Count(anomaly => anomaly.Kind == AnomalyKind.Habit),
+            });
         })
-        .WithSummary("How many findings are open, and how many of them are serious or were asked for. Drives the menu badge.");
+        .WithSummary("How many findings are open, how many of them are serious or were asked for, and how many routines are on offer. Drives the menu badge.");
 
         api.MapPost("/anomalies/{id:long}/dismiss", async (
             long id,
@@ -404,16 +454,35 @@ public static class Endpoints
             if (anomaly.Status != AnomalyStatus.Open)
                 return Results.Conflict(new { error = $"Anomaly {id} is already {anomaly.Status}." });
 
-            var dismissed = anomaly with { Status = AnomalyStatus.Dismissed, DecidedUtc = clock.GetUtcNow() };
+            // Counted, because a dismissal is the user teaching the detector: the finding has to be further
+            // past its bar to come back, and after three it stays quiet for good. A routine put away is
+            // quiet for good from the first.
+            var dismissed = anomaly with
+            {
+                Status = AnomalyStatus.Dismissed,
+                DecidedUtc = clock.GetUtcNow(),
+                Dismissals = anomaly.Dismissals + 1,
+            };
             await store.UpdateAnomalyAsync(dismissed, cancellationToken).ConfigureAwait(false);
 
+            var silenced = anomaly.Kind == AnomalyKind.Habit || dismissed.Dismissals >= AnomalyScanner.DismissalsToSilence;
             return Results.Ok(new
             {
                 anomaly = View(dismissed),
                 quietFor = settings.Current.Scan.RedetectAfter,
+                dismissals = dismissed.Dismissals,
+                silenced,
+                // What the card can say, so the same rule is worded in one place.
+                note = silenced
+                    ? (anomaly.Kind == AnomalyKind.Habit
+                        ? "Put away. This routine will not be suggested again."
+                        : "Dismissed for the third time, so it will not be raised again.")
+                    : dismissed.Dismissals == 1
+                        ? "Dismissed. If it comes back after the quiet period it will have to be further over the line; a third dismissal silences it for good."
+                        : "Dismissed again. It now has to be well over the line to come back; one more dismissal silences it for good.",
             });
         })
-        .WithSummary("Silences a finding until the re-detect window passes.");
+        .WithSummary("Silences a finding until the re-detect window passes, and remembers the dismissal so the finding has to be further over the line to return; three silence it for good.");
 
         api.MapPost("/anomalies/{id:long}/ignore", async (
             long id,
@@ -523,9 +592,10 @@ public static class Endpoints
     /// which is where the log scale puts "far".
     /// </summary>
     internal static bool IsSerious(Anomaly anomaly) =>
-        anomaly.Kind is AnomalyKind.Concern or AnomalyKind.MissingEntity ||
-        anomaly.Severity >= 4 ||
-        anomaly.EvidenceJson.Contains("\"concern\":", StringComparison.Ordinal);
+        anomaly.Kind != AnomalyKind.Habit &&
+        (anomaly.Kind is AnomalyKind.Concern or AnomalyKind.MissingEntity ||
+         anomaly.Severity >= 4 ||
+         anomaly.EvidenceJson.Contains("\"concern\":", StringComparison.Ordinal));
 
     private static string Version =>
         typeof(Endpoints).Assembly.GetName().Version?.ToString() ?? "0.1.0";
@@ -584,8 +654,11 @@ public static class Endpoints
         concern.Entities,
         [.. concern.Entities.Select(id => names.NameOf(id) ?? id)],
         concern.Rule.Describe(),
+        concern.Rule.Kind != WatchKind.Any,
         concern.Explanation,
         concern.Interpreted,
+        concern.Note,
+        concern.Provisional,
         concern.CreatedUtc);
 
     internal static AnomalyView View(Anomaly anomaly) => new(
@@ -599,7 +672,8 @@ public static class Endpoints
         anomaly.ProposalId,
         anomaly.DetectedUtc,
         anomaly.DecidedUtc,
-        anomaly.Severity);
+        anomaly.Severity,
+        anomaly.Dismissals);
 
     private static JsonNode? Node(string? json)
     {

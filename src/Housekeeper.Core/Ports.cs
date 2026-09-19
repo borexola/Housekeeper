@@ -51,6 +51,13 @@ public interface IHomeAssistant
 
     /// <summary>True when the base URL answers and the token is accepted.</summary>
     Task<bool> PingAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The IANA time zone Home Assistant is configured for, such as <c>America/Regina</c>, or null when it
+    /// could not be read. A routine is a local-time thing -- "about a quarter to seven" -- and the container
+    /// Housekeeper runs in is pinned to UTC, so the house's own zone is the only one that can say when.
+    /// </summary>
+    Task<string?> GetTimeZoneAsync(CancellationToken cancellationToken);
 }
 
 /// <summary>One state change, as Home Assistant announced it the moment it happened.</summary>
@@ -193,6 +200,18 @@ public interface IStore
         int maxPerEntity,
         CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Every stored sample since a cutoff for a chosen set of entities, grouped by entity and ordered
+    /// oldest first, at most <paramref name="maxPerEntity"/> of the newest for each. This is what habit
+    /// learning reads: weeks of a few hundred entities' transitions, which the per-scan reads deliberately
+    /// do not hold.
+    /// </summary>
+    Task<IReadOnlyDictionary<string, IReadOnlyList<StateSample>>> GetSamplesForAsync(
+        IReadOnlyCollection<string> entityIds,
+        DateTimeOffset sinceUtc,
+        int maxPerEntity,
+        CancellationToken cancellationToken);
+
     Task<int> PruneSamplesAsync(DateTimeOffset beforeUtc, CancellationToken cancellationToken);
 
     /// <summary>
@@ -219,7 +238,9 @@ public interface IStore
 
     /// <summary>
     /// Deletes findings closed before the cutoff, dismissed and resolved alike. Open ones are still true and
-    /// promoted ones explain where an automation came from, so both stay.
+    /// promoted ones explain where an automation came from, so both stay. So does a routine the user put
+    /// away, and a finding dismissed enough times to be silenced: each is the record of a "no" that must
+    /// keep being honoured.
     /// </summary>
     Task<int> PruneAnomaliesAsync(DateTimeOffset decidedBefore, CancellationToken cancellationToken);
 
@@ -240,5 +261,6 @@ public interface IStore
     Task<Concern> AddConcernAsync(Concern concern, CancellationToken cancellationToken);
     Task<IReadOnlyList<Concern>> ListConcernsAsync(CancellationToken cancellationToken);
     Task<Concern?> GetConcernAsync(long id, CancellationToken cancellationToken);
+    Task UpdateConcernAsync(Concern concern, CancellationToken cancellationToken);
     Task<bool> DeleteConcernAsync(long id, CancellationToken cancellationToken);
 }
