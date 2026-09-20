@@ -175,6 +175,20 @@ public sealed class LlmOptions
     public int MaxCandidateEntities { get; set; } = 40;
 
     /// <summary>
+    /// The model is asked only when the user asks for something, and never on Housekeeper's own schedule.
+    ///
+    /// There is one thing this turns off, because there is only one thing that ever asks the model without
+    /// being told to: a concern the model has not managed to read yet is retried on the scan's tick, one
+    /// per tick, backing off to hourly. That converges to nothing once every concern has been read, so it
+    /// is not much traffic -- but "not much" is a measurement, and someone running a model on the GPU they
+    /// also gamble their evenings on wants a guarantee. This is the guarantee. Drafting, refining and the
+    /// Read again button are unaffected; those are the asking.
+    ///
+    /// Off by default, so an install that upgrades keeps reading its concerns as it always has.
+    /// </summary>
+    public bool OnlyWhenAsked { get; set; }
+
+    /// <summary>
     /// How many times to ask before giving up. After a rejected draft the model is told exactly what the
     /// validator objected to and asked again, which is what lets a small model recover from its own mistakes.
     /// </summary>

@@ -26,11 +26,16 @@ public class AnomalyDetectionTests
         Assert.NotNull(anomaly);
         Assert.Equal(AnomalyKind.StuckState, anomaly.Kind);
         Assert.Equal("stuck:binary_sensor.freezer_door", anomaly.DedupKey);
-        // The card shows the name as its heading, so the summary starts with what happened.
-        Assert.StartsWith("Has been 'on' for 14 minutes.", anomaly.Summary);
+        // The card shows the name as its heading, so the summary starts with what happened -- in the words
+        // Home Assistant uses for a door, which is the only place the user has ever seen this sensor.
+        Assert.StartsWith("Has been open for 14 minutes.", anomaly.Summary);
         Assert.Contains("\"entity_name\":\"Freezer Door\"", anomaly.EvidenceJson);
         Assert.Contains("\"device\":\"Freezer\"", anomaly.EvidenceJson);
+        Assert.Contains("\"state\":\"on\"", anomaly.EvidenceJson);
+        Assert.Contains("\"state_label\":\"open\"", anomaly.EvidenceJson);
         Assert.Contains("binary_sensor.freezer_door", anomaly.SuggestedRequest);
+        // The drafter's sentence keeps the raw state: a trigger written against "open" would wait for a
+        // state this sensor never reaches.
         Assert.Contains("stays 'on'", anomaly.SuggestedRequest);
     }
 

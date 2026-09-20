@@ -12,6 +12,12 @@ namespace Housekeeper.Core;
 /// grows while the model keeps failing on the same one. If the model is not configured, does not answer, or
 /// names nothing that exists, the concern is still saved, matched by name, so that nothing the user asked
 /// for is quietly dropped.
+///
+/// The tick is the only thing in Housekeeper that asks the model without being asked, so it is the only
+/// thing <see cref="LlmOptions.OnlyWhenAsked"/> switches off. Adding a concern and pressing Read again are
+/// the user asking, and go on working; what stops is Housekeeper deciding on its own that now is a good
+/// moment to spend half a minute of someone's GPU. A concern left unread then says so, and says what to
+/// press, rather than promising a retry that is never coming.
 /// </summary>
 public sealed class ConcernService(
     IHomeAssistant homeAssistant,
@@ -94,6 +100,7 @@ public sealed class ConcernService(
     public async Task<int> ReadPendingAsync(CancellationToken cancellationToken)
     {
         var llmOptions = settings.Current.Llm;
+        if (llmOptions.OnlyWhenAsked) return 0;
         if (llmOptions.IsOllama && string.IsNullOrWhiteSpace(llmOptions.Model)) return 0;
 
         var now = clock.GetUtcNow();
@@ -255,6 +262,15 @@ public sealed class ConcernService(
         if (options.Llm.IsOllama && string.IsNullOrWhiteSpace(options.Llm.Model))
             return (null, "No model is chosen, so this was matched by name only. Pick one under Settings → Model and it will be read properly.", Outcome.Unavailable);
 
+        // What happens to a concern the model could not read, which is not the same thing when nothing is
+        // going to pick it up again on its own.
+        var next = options.Llm.OnlyWhenAsked
+            ? " Housekeeper only asks the model when you do, so press Read again when it is back."
+            : " It will be read again when the model is back; check Settings → Model if it stays this way.";
+        var retry = options.Llm.OnlyWhenAsked
+            ? " Housekeeper only asks the model when you do, so press Read again to try once more."
+            : " It will be asked again.";
+
         // The shortlist is the concern's own words against the house, plus what name matching found, so the
         // model chooses among things that could plausibly be meant rather than among everything.
         var byId = entities.ToDictionary(e => e.EntityId, StringComparer.Ordinal);
@@ -271,14 +287,14 @@ public sealed class ConcernService(
             if (raw is null)
             {
                 logger.LogWarning("The model did not answer when asked to read a concern; matching it by name instead.");
-                return (null, $"The model did not answer ({llm.Name}), so this was matched by name only. It will be read again when the model is back; check Settings → Model if it stays this way.", Outcome.Unavailable);
+                return (null, $"The model did not answer ({llm.Name}), so this was matched by name only.{next}", Outcome.Unavailable);
             }
 
             var read = Concerns.Parse(raw, known);
             if (read is null)
             {
                 logger.LogWarning("The model's answer to a concern was not usable; matching it by name instead.");
-                return (null, "The model's answer could not be read, so this was matched by name only. It will be asked again.", Outcome.Unusable);
+                return (null, "The model's answer could not be read, so this was matched by name only." + retry, Outcome.Unusable);
             }
 
             if (read.Value.Entities.Count == 0)
@@ -289,7 +305,7 @@ public sealed class ConcernService(
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             logger.LogWarning(ex, "Could not ask the model to read a concern; matching it by name instead.");
-            return (null, $"The model could not be asked ({ex.Message}), so this was matched by name only. It will be asked again.", Outcome.Unavailable);
+            return (null, $"The model could not be asked ({ex.Message}), so this was matched by name only.{retry}", Outcome.Unavailable);
         }
     }
 }

@@ -84,6 +84,7 @@ Each is `HOUSEKEEPER__Section__Key` as an environment variable, or nested under 
 | `Provider` | `Ollama` | `Ollama`, or `OpenAI` for any OpenAI-compatible chat-completions endpoint. |
 | `Endpoint` | `http://localhost:11434` | For an OpenAI-style server, `http://host:8080/v1` — with or without the `/v1`, both work. |
 | `Model` | *(empty)* | Empty means whatever the server has loaded, which suits LM Studio, llama.cpp and similar. Ollama needs a name. |
+| `OnlyWhenAsked` | `false` | Contact the model only when you pressed something. See below. |
 | `Timeout` | `90s` | A 7B model on CPU is slow; this is generous on purpose. |
 | `Temperature` | `0.1` | |
 | `MaxOutputTokens` | `1200` | |
@@ -101,6 +102,26 @@ A small model does not have to be right first time. Every draft is checked again
 your real services, and a rejected one goes back to the model with the exact sentence it was rejected with.
 That is worth more than a larger model: raising `MaxAttempts` costs time, not accuracy, and the validator
 never lets a wrong answer through regardless of how many attempts it took.
+
+#### When Housekeeper talks to your model
+
+Two things do, and one of them is you pressing a button:
+
+- **Drafting**, when you ask for an automation, press *Make an automation* on a finding, or refine a draft.
+  Up to `MaxAttempts` calls, fewer if the model repeats itself or says it cannot be done.
+- **Reading a concern.** The model is asked when you add one. If it was down, or answered with something
+  unusable, the scan's tick tries again — at most one concern per tick, least recently tried first, with the
+  gap doubling per failure to a ceiling of an hour, and it gives up after three unusable answers. A concern
+  the model has read is never re-read, so once they have all been read this is nothing at all.
+
+Nothing else does. The scan itself never calls the model, nor does the dashboard's polling or
+`GET /api/status`; *Test connection* asks which models the server has without running one.
+
+`OnlyWhenAsked` turns off that second bullet's retry, and only that — drafting, refining and the
+*Read again* button on a concern all work exactly as before. It trades a guarantee for some arithmetic: the
+background traffic was already small and self-extinguishing, but "small" is a measurement and this is a
+promise. A concern left unread while it is on says so on its card, and says to press *Read again*, rather
+than promising a retry that is not coming.
 
 ### Watching (`Scan`)
 

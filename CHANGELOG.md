@@ -6,6 +6,29 @@ All notable changes to Housekeeper are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-09-20
+
+### Added
+- `Llm.OnlyWhenAsked`, on the settings page as "Only ask the model when I do". With it on, nothing in
+  Housekeeper contacts the model unless you pressed something. Drafting, refining and a concern's *Read
+  again* button are unchanged; what stops is the scan tick retrying a concern the model has not managed to
+  read yet. That retry was already one concern per tick at most, backing off to hourly and stopping after
+  three unusable answers, and nothing at all once every concern has been read — but this makes it a
+  guarantee rather than an arithmetic argument. A concern left unread while it is on says to press *Read
+  again* instead of promising a retry that will not come. Off by default. `docs/configuration.md` now
+  lists every path that reaches the model, which is drafting and that one retry.
+
+### Changed
+- States are read back in the words Home Assistant shows for them. A pantry door sensor is "open", not
+  "on"; a leak sensor is "wet", a range "running", a motion sensor "detected", a problem sensor "OK". The
+  wording is taken from Home Assistant's own state strings and turns on the entity's device class, so the
+  same sensor reads the same in both places. It applies to the finding cards on the Noticed page and their
+  suggested automations, to a concern's rule, and to the plain-words readback of every draft — "the garage
+  door has been open for 15 minutes" rather than "has been on". What an automation is written against is
+  untouched: a draft still triggers on `to: "on"`, because that is the state the sensor really reaches.
+  A trigger that covers entities wording `on` differently — a door and a lamp — keeps the raw state,
+  which is at least not wrong about either. Findings raised before this reword themselves on the next scan.
+
 ## [0.1.1] - 2026-09-19
 
 ### Added
@@ -608,6 +631,7 @@ All notable changes to Housekeeper are documented here. The format follows
 - The scan worker takes its timers from the injected `TimeProvider`.
 - `launchSettings.json` opens the dashboard on the address the app actually binds.
 
-[Unreleased]: https://github.com/borexola/Housekeeper/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/borexola/Housekeeper/compare/v0.1.2...HEAD
+[0.1.2]: https://github.com/borexola/Housekeeper/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/borexola/Housekeeper/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/borexola/Housekeeper/releases/tag/v0.1.0

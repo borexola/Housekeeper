@@ -253,7 +253,7 @@ public class HabitRuleTests
     public void Clock_routines_are_told_in_the_house_time_zone()
     {
         // Six hours behind UTC: ten past nine in the evening is ten past three the next morning in UTC.
-        var zone = TimeZoneInfo.CreateCustomTimeZone("Test/Regina", TimeSpan.FromHours(-6), "Regina (test)", "Regina (test)");
+        var zone = TimeZoneInfo.CreateCustomTimeZone("Test/Minus6", TimeSpan.FromHours(-6), "UTC-6 (test)", "UTC-6 (test)");
         var porch = Build.Entity("light.porch", "off", Start, friendlyName: "Porch light");
         var diary = new Diary().Add(porch.EntityId, Start, "off");
         for (var day = 0; day < 8; day++)
@@ -676,14 +676,14 @@ public class TimeZoneReadTests
     public async Task The_time_zone_is_read_from_the_config_and_held_for_hours()
     {
         var (client, handler, clock, _) = Make();
-        handler.Body = _ => Task.FromResult("""{"time_zone":"America/Regina","elevation":10}""");
+        handler.Body = _ => Task.FromResult("""{"time_zone":"America/New_York","elevation":10}""");
 
-        Assert.Equal("America/Regina", await client.GetTimeZoneAsync(CancellationToken.None));
-        Assert.Equal("America/Regina", await client.GetTimeZoneAsync(CancellationToken.None));
+        Assert.Equal("America/New_York", await client.GetTimeZoneAsync(CancellationToken.None));
+        Assert.Equal("America/New_York", await client.GetTimeZoneAsync(CancellationToken.None));
         Assert.Equal(1, handler.Requests.Count(request => request == "GET /api/config"));
 
         clock.Advance(TimeSpan.FromHours(7));
-        Assert.Equal("America/Regina", await client.GetTimeZoneAsync(CancellationToken.None));
+        Assert.Equal("America/New_York", await client.GetTimeZoneAsync(CancellationToken.None));
         Assert.Equal(2, handler.Requests.Count(request => request == "GET /api/config"));
     }
 
@@ -709,13 +709,13 @@ public class TimeZoneReadTests
     {
         var (client, handler, _, _) = Make();
         handler.Status = HttpStatusCode.BadGateway;
-        handler.Body = _ => Task.FromResult("""{"time_zone":"America/Regina"}""");
+        handler.Body = _ => Task.FromResult("""{"time_zone":"America/New_York"}""");
 
         Assert.Null(await client.GetTimeZoneAsync(CancellationToken.None));
 
         // Not cached: the very next call asks again and takes the good answer.
         handler.Status = HttpStatusCode.OK;
-        Assert.Equal("America/Regina", await client.GetTimeZoneAsync(CancellationToken.None));
+        Assert.Equal("America/New_York", await client.GetTimeZoneAsync(CancellationToken.None));
         Assert.Equal(2, handler.Requests.Count(request => request == "GET /api/config"));
     }
 

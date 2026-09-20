@@ -130,16 +130,22 @@ function baselineWhen(e) {
   return null;
 }
 
+// The state as Home Assistant writes it — "open" for a door, not "on". Worked out when the finding was
+// raised, because the device class it turns on lives with the entity; a finding stored before this
+// existed, or closed since, still has only the raw state and reads as it always did.
+function stateWords(e) { return e.state_label || e.state; }
+
 function explain(a) {
   const e = a.evidence || {};
   const stretches = (n) => n + ' earlier ' + (n === 1 ? 'stretch' : 'stretches');
 
   if (a.kind === 'StuckState' && e.held_for_seconds != null && e.typical_seconds != null) {
     const when = baselineWhen(e);
+    const state = stateWords(e);
     return {
-      what: capitalise(e.state) + ' for ' + spoken(e.held_for_seconds) + '.',
-      was: 'Was ' + e.state + ' for ' + spoken(e.held_for_seconds) + '.',
-      why: (when ? capitalise(when) + ' it is' : 'It is') + ' usually ' + e.state + ' for about ' + spoken(e.typical_seconds)
+      what: capitalise(state) + ' for ' + spoken(e.held_for_seconds) + '.',
+      was: 'Was ' + state + ' for ' + spoken(e.held_for_seconds) + '.',
+      why: (when ? capitalise(when) + ' it is' : 'It is') + ' usually ' + state + ' for about ' + spoken(e.typical_seconds)
         + '. The longest before now was ' + spoken(e.longest_previous_seconds) + ', in ' + stretches(e.previous_periods) + '.',
     };
   }
@@ -161,9 +167,10 @@ function explain(a) {
   }
 
   if (a.kind === 'Unavailable' && e.quiet_for_seconds != null) {
+    const state = stateWords(e) || 'unavailable';
     return {
-      what: capitalise(e.state || 'unavailable') + ' for ' + spoken(e.quiet_for_seconds) + '.',
-      was: 'Was ' + (e.state || 'unavailable') + ' for ' + spoken(e.quiet_for_seconds) + '.',
+      what: capitalise(state) + ' for ' + spoken(e.quiet_for_seconds) + '.',
+      was: 'Was ' + state + ' for ' + spoken(e.quiet_for_seconds) + '.',
       why: 'It reported normally in ' + Math.round((e.reliability || 0) * 100) + '% of its last ' + e.samples + ' recorded changes.',
     };
   }
@@ -172,7 +179,15 @@ function explain(a) {
 }
 
 function suggestionText(a) {
-  return a.suggestedRequest.replace(a.entityId, 'it').replace(/'([^']*)'/g, '$1').replace(/^Notify me/, 'notify you');
+  // The request is what the model will be handed, so it says 'on' where Home Assistant would say "open":
+  // a draft written against "open" would target a state a binary sensor never has. The sentence shown to
+  // the user is the same one with that quoted state put back into their own words.
+  const e = a.evidence || {};
+  const label = stateWords(e);
+  return a.suggestedRequest
+    .replace(a.entityId, 'it')
+    .replace(/'([^']*)'/g, (_, quoted) => label && quoted === e.state ? label : quoted)
+    .replace(/^Notify me/, 'notify you');
 }
 
 function linkedNote(a, proposal) {

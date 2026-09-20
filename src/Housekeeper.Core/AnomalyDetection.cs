@@ -118,8 +118,8 @@ public static class AnomalyDetection
             DetectedUtc = nowUtc,
             Severity = Times(heldFor, worst * options.StuckMultiplier),
             Summary =
-                $"Has been '{entity.State}' for {Ha.Duration(heldFor)}. " +
-                $"Usually '{entity.State}' for about {Ha.Duration(typical)}{when}. " +
+                $"Has been {entity.StateLabel} for {Ha.Duration(heldFor)}. " +
+                $"Usually {entity.StateLabel} for about {Ha.Duration(typical)}{when}. " +
                 $"The longest before now was {Ha.Duration(worst)}, across {baseline.Count} earlier stretches " +
                 $"seen over {Ha.Duration(Witnessed(baseline))}.",
             SuggestedRequest =
@@ -127,6 +127,7 @@ public static class AnomalyDetection
             EvidenceJson = Evidence(entity, new Dictionary<string, object?>
             {
                 ["state"] = entity.State,
+                ["state_label"] = entity.StateLabel,
                 ["held_for_seconds"] = Math.Round(heldFor.TotalSeconds),
                 ["typical_seconds"] = Math.Round(typical.TotalSeconds),
                 ["longest_previous_seconds"] = Math.Round(worst.TotalSeconds),
@@ -879,7 +880,7 @@ public static class AnomalyDetection
             DetectedUtc = nowUtc,
             Severity = Times(quietFor, options.MinimumUnavailableDuration),
             Summary =
-                $"Has been '{entity.State}' for {Ha.Duration(quietFor)}. " +
+                $"Has been {entity.StateLabel} for {Ha.Duration(quietFor)}. " +
                 $"It reported normally in {Math.Round(reliability * 100)}% of {changes} over the previous {Ha.Duration(watchedFor)}.",
             SuggestedRequest =
                 $"Notify me when {entity.EntityId} becomes unavailable for more than " +
@@ -887,6 +888,7 @@ public static class AnomalyDetection
             EvidenceJson = Evidence(entity, new Dictionary<string, object?>
             {
                 ["state"] = entity.State,
+                ["state_label"] = entity.StateLabel,
                 ["quiet_for_seconds"] = Math.Round(quietFor.TotalSeconds),
                 ["reliability"] = Math.Round(reliability, 4),
                 ["samples"] = previous.Count,

@@ -53,7 +53,7 @@ public interface IHomeAssistant
     Task<bool> PingAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// The IANA time zone Home Assistant is configured for, such as <c>America/Regina</c>, or null when it
+    /// The IANA time zone Home Assistant is configured for, such as <c>America/New_York</c>, or null when it
     /// could not be read. A routine is a local-time thing -- "about a quarter to seven" -- and the container
     /// Housekeeper runs in is pinned to UTC, so the house's own zone is the only one that can say when.
     /// </summary>

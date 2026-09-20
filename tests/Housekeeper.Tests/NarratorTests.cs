@@ -20,9 +20,24 @@ public class NarratorTests
         ["climate.living_room"] = "Living room thermostat",
     };
 
+    /// <summary>
+    /// The device classes the house's entities really carry, because they are what decides how a state is
+    /// read back: the same <c>to: "on"</c> is a door opening, a range starting and a motion sensor seeing
+    /// someone, and the reader is checking which one of those they meant.
+    /// </summary>
+    private static readonly Dictionary<string, string> Classes = new(StringComparer.Ordinal)
+    {
+        ["binary_sensor.hall_motion"] = "motion",
+        ["binary_sensor.kitchen_range_running"] = "running",
+        ["binary_sensor.garage_door"] = "garage_door",
+        ["binary_sensor.basement_leak"] = "moisture",
+    };
+
     private static string? NameOf(string id) => Names.GetValueOrDefault(id);
 
-    private static Narrative Tell(string json) => Assert.IsType<Narrative>(AutomationNarrator.Describe(json, NameOf));
+    private static string? ClassOf(string id) => Classes.GetValueOrDefault(id);
+
+    private static Narrative Tell(string json) => Assert.IsType<Narrative>(AutomationNarrator.Describe(json, NameOf, ClassOf));
 
     [Fact]
     public void A_state_trigger_held_for_a_while_reads_as_one_sentence()
@@ -73,7 +88,7 @@ public class NarratorTests
              "mode":"restart"}
             """);
 
-        Assert.Equal(["Hall motion turns on"], story.When);
+        Assert.Equal(["Hall motion detects something"], story.When);
         Assert.Equal(["it is after sunset"], story.OnlyIf);
         Assert.Equal(["Turn on Hall light at 60% brightness", "Wait 2 minutes", "Turn off Hall light"], story.Then);
     }
@@ -88,8 +103,8 @@ public class NarratorTests
                         "sequence":[{"action":"notify.notify","data":{"message":"Still running."}},{"delay":"00:30:00"}]}}],"mode":"single"}
             """);
 
-        Assert.Equal(["Kitchen range has been on for 2 hours"], story.When);
-        Assert.Equal(["Repeat while Kitchen range is on: send a notification: “Still running.”, then wait 30 minutes"], story.Then);
+        Assert.Equal(["Kitchen range has been running for 2 hours"], story.When);
+        Assert.Equal(["Repeat while Kitchen range is running: send a notification: “Still running.”, then wait 30 minutes"], story.Then);
     }
 
     [Fact]
@@ -131,7 +146,7 @@ public class NarratorTests
              "actions":[{"action":"switch.turn_on","target":{"entity_id":["switch.fan_1","switch.fan_2"]}}]}
             """);
 
-        Assert.Equal(["garage door (binary sensor) has been on for 15 minutes"], story.When);
+        Assert.Equal(["garage door (binary sensor) has been open for 15 minutes"], story.When);
         Assert.Equal(["Turn on fan 1 (switch) and fan 2 (switch)"], story.Then);
     }
 
@@ -145,6 +160,54 @@ public class NarratorTests
 
         Assert.Equal(["every 15 minutes"], story.When);
         Assert.Equal(["Start robo (vacuum)", "Call custom.do_thing", "Stop: done"], story.Then);
+    }
+
+    /// <summary>
+    /// The same <c>on</c>, three device classes, three sentences — and a light, which has no device class
+    /// and whose <c>on</c> really is on.
+    /// </summary>
+    [Fact]
+    public void One_raw_state_is_read_back_in_each_entitys_own_words()
+    {
+        string When(string entityId) => Tell("""
+            {"alias":"x","triggers":[{"trigger":"state","entity_id":"WHICH","to":"on"}],
+             "actions":[{"action":"notify.notify","data":{"message":"hi"}}]}
+            """.Replace("WHICH", entityId)).When.Single();
+
+        Assert.Equal("garage door (binary sensor) opens", When("binary_sensor.garage_door"));
+        Assert.Equal("Hall motion detects something", When("binary_sensor.hall_motion"));
+        Assert.Equal("basement leak (binary sensor) becomes wet", When("binary_sensor.basement_leak"));
+        Assert.Equal("Hall light turns on", When("light.hall"));
+    }
+
+    /// <summary>
+    /// A trigger over a door and a lamp has no one word for <c>on</c>, so it keeps the raw state rather
+    /// than telling the reader that their hall light opens.
+    /// </summary>
+    [Fact]
+    public void A_trigger_over_entities_that_disagree_keeps_the_raw_state()
+    {
+        var story = Tell("""
+            {"alias":"x","triggers":[{"trigger":"state","entity_id":["binary_sensor.garage_door","light.hall"],"to":"on"}],
+             "actions":[{"action":"notify.notify","data":{"message":"hi"}}]}
+            """);
+
+        Assert.Equal(["garage door (binary sensor) or Hall light turns on"], story.When);
+    }
+
+    /// <summary>
+    /// With no device classes to hand the readback is exactly what it always was. Nothing that reads a
+    /// draft back can be made to fail by not knowing something about the house.
+    /// </summary>
+    [Fact]
+    public void Without_device_classes_the_states_are_read_as_home_assistant_stores_them()
+    {
+        var story = Assert.IsType<Narrative>(AutomationNarrator.Describe("""
+            {"alias":"x","triggers":[{"trigger":"state","entity_id":"binary_sensor.garage_door","to":"on","for":{"minutes":15}}],
+             "actions":[{"action":"notify.notify","data":{"message":"hi"}}]}
+            """, NameOf));
+
+        Assert.Equal(["garage door (binary sensor) has been on for 15 minutes"], story.When);
     }
 
     [Fact]

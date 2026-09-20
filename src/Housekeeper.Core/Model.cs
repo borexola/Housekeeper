@@ -67,6 +67,13 @@ public sealed record HaEntity(
 
     /// <summary>True when Home Assistant reports the entity as missing or not yet known.</summary>
     public bool IsUnavailable => Ha.IsUnavailable(State);
+
+    /// <summary>
+    /// The state as Home Assistant words it for this entity -- "open" rather than "on" for a door --
+    /// ready to sit mid-sentence. For reading to a person only: <see cref="State"/> is what a draft,
+    /// a rule and every comparison use.
+    /// </summary>
+    public string StateLabel => Ha.StateLabel(Domain, DeviceClass, State);
 }
 
 /// <summary>An automation that already exists in Home Assistant, reduced to what duplicate detection needs.</summary>
@@ -250,6 +257,79 @@ public static class Ha
 
     public static bool IsUnavailable(string? state) =>
         state is null || UnavailableStates.Contains(state.Trim(), StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// A state written the way Home Assistant's own interface writes it: a door sensor at <c>on</c> is
+    /// open, a moisture sensor at <c>on</c> is wet, a problem sensor at <c>off</c> is OK. The raw state is
+    /// what an automation is written against and what the detectors compare, and it stays that everywhere
+    /// those two things happen -- but it is not what the user sees anywhere in their house, and a card
+    /// reading "On for 30 minutes" about a pantry door tells them nothing about a pantry door.
+    ///
+    /// Returned in the form that belongs in the middle of a sentence -- "usually open for about 17
+    /// seconds" -- because the pages that start a sentence with it already capitalise, and doing it this
+    /// way round keeps "OK" as OK.
+    ///
+    /// The wording is Home Assistant's, taken from its <c>binary_sensor</c> and per-domain state strings,
+    /// so the same entity reads the same in both places. Anything not listed falls back to the state with
+    /// its underscores opened out, which is what Home Assistant does with an unrecognised state too; that
+    /// also leaves a device tracker's zone name alone, because "Work" is a place, not a word.
+    /// </summary>
+    public static string StateLabel(string domain, string? deviceClass, string? state)
+    {
+        var raw = state?.Trim() ?? "";
+        if (raw.Length == 0) return "unavailable";
+
+        var s = raw.ToLowerInvariant();
+        var known = domain.ToLowerInvariant() switch
+        {
+            "binary_sensor" => BinaryLabel(deviceClass?.Trim().ToLowerInvariant(), s),
+            "person" or "device_tracker" => s switch { "home" => "home", "not_home" => "away", _ => null },
+            "update" => s switch { "on" => "update available", "off" => "up-to-date", _ => null },
+            "vacuum" => s == "returning" ? "returning to dock" : null,
+            "climate" => s == "heat_cool" ? "heat/cool" : null,
+            _ => null,
+        };
+
+        return known ?? raw.Replace('_', ' ');
+    }
+
+    /// <summary>
+    /// What <c>on</c> and <c>off</c> mean for a binary sensor, which is entirely down to its device class.
+    /// Note that <c>lock</c> here is the inverse of the lock domain -- a lock binary sensor is a contact,
+    /// and its <c>on</c> means unlocked -- and that <c>presence</c> is home and away rather than detected
+    /// and clear. Both are Home Assistant's, and both are the kind of thing worth getting from its
+    /// strings file rather than from first principles.
+    /// </summary>
+    private static string? BinaryLabel(string? deviceClass, string state)
+    {
+        if (state is not ("on" or "off")) return null;
+        var on = state == "on";
+
+        return deviceClass switch
+        {
+            "battery" => on ? "low" : "normal",
+            "battery_charging" => on ? "charging" : "not charging",
+            "carbon_monoxide" or "gas" or "motion" or "occupancy" or "smoke" or "sound" or "vibration"
+                => on ? "detected" : "clear",
+            "cold" => on ? "cold" : "normal",
+            "connectivity" => on ? "connected" : "disconnected",
+            "door" or "garage_door" or "opening" or "window" => on ? "open" : "closed",
+            "glass_break" => on ? "glass break detected" : "clear",
+            "heat" => on ? "hot" : "normal",
+            "light" => on ? "light detected" : "no light",
+            "lock" => on ? "unlocked" : "locked",
+            "moisture" => on ? "wet" : "dry",
+            "moving" => on ? "moving" : "not moving",
+            "plug" => on ? "plugged in" : "unplugged",
+            "presence" => on ? "home" : "away",
+            "problem" => on ? "problem" : "OK",
+            "running" => on ? "running" : "not running",
+            "safety" => on ? "unsafe" : "safe",
+            "tamper" => on ? "tampering detected" : "clear",
+            "update" => on ? "update available" : "up-to-date",
+            _ => on ? "on" : "off",
+        };
+    }
 
     /// <summary>
     /// Services that act on Home Assistant itself rather than on something in the house.

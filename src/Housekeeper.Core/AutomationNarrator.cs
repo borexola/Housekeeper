@@ -15,9 +15,10 @@ public sealed record Narrative(IReadOnlyList<string> When, IReadOnlyList<string>
 ///
 /// The YAML is what Home Assistant receives and it stays on the card, but YAML is the wrong thing to make
 /// someone read to answer "is this what I meant?". A trigger written as <c>to: "on"</c> with a <c>for:</c>
-/// of ten minutes is one line here, "Freezer door has been on for 10 minutes", and a <c>choose</c> over two
-/// trigger ids becomes two lines that start with "If". Every entity is named the way Home Assistant names it,
-/// so the reader checks the light they meant rather than an id they have to translate.
+/// of ten minutes is one line here, "Freezer door has been open for 10 minutes", and a <c>choose</c> over
+/// two trigger ids becomes two lines that start with "If". Every entity is named and every state worded the
+/// way Home Assistant does it, so the reader checks the light they meant rather than translating an id, and
+/// reads about a door opening rather than about it turning on.
 ///
 /// Deterministic on purpose. Asking the model to explain its own draft would cost a second call and would
 /// describe what it meant rather than what it wrote; this describes exactly the config that was validated,
@@ -32,7 +33,12 @@ public static class AutomationNarrator
     /// <summary>How much of a notification message or template is quoted before it is cut.</summary>
     private const int MaxQuote = 140;
 
-    public static Narrative? Describe(string? configJson, Func<string, string?> nameOf)
+    /// <param name="classOf">
+    /// An entity's device class, which is what decides how its states are worded: a door sensor's
+    /// <c>on</c> is open. Left out, every state is read as Home Assistant's raw value, which is what the
+    /// readback did before and is never wrong, only unhelpful.
+    /// </param>
+    public static Narrative? Describe(string? configJson, Func<string, string?> nameOf, Func<string, string?>? classOf = null)
     {
         if (string.IsNullOrWhiteSpace(configJson)) return null;
 
@@ -42,7 +48,7 @@ public static class AutomationNarrator
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object) return null;
 
-            var teller = new Teller(nameOf);
+            var teller = new Teller(nameOf, classOf ?? (_ => null));
 
             var triggers = Items(Block(root, "triggers", "trigger"));
             var when = triggers.Select(teller.Trigger).ToList();
@@ -120,7 +126,7 @@ public static class AutomationNarrator
     /// <summary>
     /// The voice, carrying the entity names and the trigger ids so nested blocks can use both.
     /// </summary>
-    private sealed class Teller(Func<string, string?> nameOf)
+    private sealed class Teller(Func<string, string?> nameOf, Func<string, string?> classOf)
     {
         public Dictionary<string, string> TriggerNames { get; } = new(StringComparer.Ordinal);
 
@@ -143,9 +149,10 @@ public static class AutomationNarrator
                         var from = Text(trigger, "from");
 
                         string clause;
-                        if (to is not null && from is not null) clause = $"{subject} goes from {Value(from)} to {Value(to)}";
-                        else if (to is not null) clause = held is null ? $"{subject} {Becomes(to)}" : $"{subject} has been {Value(to)}";
-                        else if (from is not null) clause = $"{subject} leaves {Value(from)}";
+                        var entities = Child(trigger, "entity_id");
+                        if (to is not null && from is not null) clause = $"{subject} goes from {Said(entities, from)} to {Said(entities, to)}";
+                        else if (to is not null) clause = held is null ? $"{subject} {Becomes(Said(entities, to))}" : $"{subject} has been {Said(entities, to)}";
+                        else if (from is not null) clause = $"{subject} leaves {Said(entities, from)}";
                         else clause = $"{subject} changes";
 
                         return held is null ? clause : $"{clause} for {held}";
@@ -252,7 +259,10 @@ public static class AutomationNarrator
                 case "state":
                     {
                         var states = Strings(Child(condition, "state"));
-                        var value = states.Count == 0 ? "in the expected state" : Join(states.Select(Value), " or ");
+                        var entities = Child(condition, "entity_id");
+                        var value = states.Count == 0
+                            ? "in the expected state"
+                            : Join(states.Select(state => Said(entities, state)), " or ");
                         var held = Span(Child(condition, "for"));
                         return held is null ? $"{subject} is {value}" : $"{subject} has been {value} for {held}";
                     }
@@ -557,6 +567,25 @@ public static class AutomationNarrator
                 : $"{objectPart} ({domain})";
         }
 
+        /// <summary>
+        /// A state in the words Home Assistant uses for the entities being spoken about -- "open" for a
+        /// door rather than "on" -- but only where they all use the same ones. A trigger over a door and
+        /// a lamp has no single word for <c>on</c>, so it keeps the raw state, which is at least not
+        /// wrong about either of them.
+        /// </summary>
+        private string Said(JsonElement? entityIds, string state)
+        {
+            string? agreed = null;
+            foreach (var entityId in Strings(entityIds))
+            {
+                var label = Ha.StateLabel(Ha.DomainOf(entityId), classOf(entityId), state);
+                if (agreed is null) agreed = label;
+                else if (!string.Equals(agreed, label, StringComparison.Ordinal)) return Value(state);
+            }
+
+            return agreed ?? Value(state);
+        }
+
         private string Names(JsonElement? element, string joiner)
         {
             var ids = Strings(element);
@@ -566,6 +595,12 @@ public static class AutomationNarrator
 
     // ---- small words ----
 
+    /// <summary>
+    /// A state arriving, as a verb. Given the state in Home Assistant's own words, so the cases below the
+    /// first two are the wordings a device class produces -- a door sensor reaches here as "open", never
+    /// as "on". The ones listed are those that "becomes X" says badly: "becomes wet" is a sentence and
+    /// "becomes update available" is not.
+    /// </summary>
     private static string Becomes(string state) => state.ToLowerInvariant() switch
     {
         "on" => "turns on",
@@ -575,11 +610,30 @@ public static class AutomationNarrator
         "locked" => "locks",
         "unlocked" => "unlocks",
         "home" => "arrives home",
-        "not_home" => "leaves home",
+        "away" or "not_home" => "leaves home",
         "unavailable" => "becomes unavailable",
         "playing" => "starts playing",
         "paused" => "pauses",
         "idle" => "goes idle",
+        "detected" => "detects something",
+        "clear" => "clears",
+        "light detected" => "sees light",
+        "no light" => "sees dark",
+        "glass break detected" => "detects a glass break",
+        "tampering detected" => "detects tampering",
+        "moving" => "starts moving",
+        "not moving" => "stops moving",
+        "running" => "starts running",
+        "not running" => "stops running",
+        "charging" => "starts charging",
+        "not charging" => "stops charging",
+        "plugged in" => "is plugged in",
+        "unplugged" => "is unplugged",
+        "problem" => "reports a problem",
+        "ok" => "reads OK",
+        "update available" => "has an update available",
+        "up-to-date" => "becomes up to date",
+        "returning to dock" => "heads back to its dock",
         _ => $"becomes {Value(state)}",
     };
 

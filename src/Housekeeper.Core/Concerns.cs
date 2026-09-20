@@ -22,15 +22,20 @@ public sealed record WatchRule(WatchKind Kind, double? Value = null, string? Sta
 {
     public static readonly WatchRule Attention = new(WatchKind.Any);
 
-    /// <summary>The rule in words, for a card and for the log.</summary>
-    public string Describe()
+    /// <summary>
+    /// The rule in words, for a card and for the log. <paramref name="stateLabel"/> is how Home Assistant
+    /// writes <see cref="State"/> for the entity being described -- "open" for a door rather than "on" --
+    /// and is left out by callers that are talking about the rule rather than about one entity, where
+    /// there is no single device class to word it by.
+    /// </summary>
+    public string Describe(string? stateLabel = null)
     {
         var held = For is { } f ? $" for more than {Ha.Duration(f)}" : "";
         return Kind switch
         {
             WatchKind.Above => $"reads above {Ha.Number(Value ?? 0)}{held}",
             WatchKind.Below => $"reads below {Ha.Number(Value ?? 0)}{held}",
-            WatchKind.Held => $"stays '{State}'{(For is null ? " unusually long" : held)}",
+            WatchKind.Held => $"stays {stateLabel ?? State}{(For is null ? " unusually long" : held)}",
             WatchKind.Unavailable => $"goes unavailable{held}",
             _ => "behaves unusually",
         };
@@ -358,7 +363,7 @@ public static class Concerns
                     if (rule.For is { } window && held < window) return null;
                     if (rule.For is null) return null;
 
-                    what = $"Has been '{entity.State}' for {Ha.Duration(held)}; you asked to be told after {Ha.Duration(rule.For.Value)}.";
+                    what = $"Has been {entity.StateLabel} for {Ha.Duration(held)}; you asked to be told after {Ha.Duration(rule.For.Value)}.";
                     severity += Math.Min(4, held.TotalSeconds / Math.Max(60, rule.For.Value.TotalSeconds) - 1);
                     break;
                 }
@@ -369,7 +374,7 @@ public static class Concerns
                     var window = rule.For ?? TimeSpan.FromMinutes(10);
                     if (held < window) return null;
 
-                    what = $"Has been '{entity.State}' for {Ha.Duration(held)}; you asked to be told after {Ha.Duration(window)}.";
+                    what = $"Has been {entity.StateLabel} for {Ha.Duration(held)}; you asked to be told after {Ha.Duration(window)}.";
                     break;
                 }
 
@@ -394,16 +399,28 @@ public static class Concerns
                 ["device"] = entity.DeviceName,
                 ["area"] = entity.Area,
                 ["state"] = entity.State,
+                ["state_label"] = entity.StateLabel,
                 ["held_for_seconds"] = Math.Round(held.TotalSeconds),
                 ["what"] = what,
                 ["concern"] = concern.Text,
                 ["concern_id"] = concern.Id,
-                ["rule"] = rule.Describe(),
+                ["rule"] = rule.Describe(LabelFor(rule, entity)),
             }),
         };
     }
 
-    /// <summary>The automation a concern's finding turns into, said the way the drafter expects.</summary>
+    /// <summary>
+    /// The rule's state said the way this entity's own device class says it, so a held-state rule that a
+    /// door raised reads "stays open" rather than "stays on". Null for a rule that names no state.
+    /// </summary>
+    private static string? LabelFor(WatchRule rule, HaEntity entity) =>
+        rule.State is { } state ? Ha.StateLabel(entity.Domain, entity.DeviceClass, state) : null;
+
+    /// <summary>
+    /// The automation a concern's finding turns into, said the way the drafter expects. The raw state on
+    /// purpose: this sentence is the drafter's input, and a model told to watch for "open" writes
+    /// <c>to: "open"</c> against a binary sensor that is only ever <c>on</c> or <c>off</c>.
+    /// </summary>
     private static string Suggest(Concern concern, HaEntity entity) => concern.Rule.Kind switch
     {
         WatchKind.Above => $"Notify me when {entity.EntityId} goes above {Ha.Number(concern.Rule.Value ?? 0)}" + ForClause(concern.Rule) + ".",

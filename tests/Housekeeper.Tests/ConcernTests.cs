@@ -160,6 +160,42 @@ public class ConcernMatchingTests
         Assert.NotNull(Concerns.Evaluate(concern, House[3] with { State = "open", LastChanged = now.AddMinutes(-45) }, [], now));
         Assert.Null(Concerns.Evaluate(concern, House[3] with { State = "closed", LastChanged = now.AddHours(-2) }, [], now));
     }
+
+    /// <summary>
+    /// A concern about a door reads back in a door's words. The rule keeps the raw state for the drafter,
+    /// and the two sentences the card is built from — the summary and the evidence — take the shown one.
+    /// </summary>
+    [Fact]
+    public void A_finding_is_read_back_in_the_words_home_assistant_uses()
+    {
+        var now = new DateTimeOffset(2026, 3, 1, 12, 0, 0, TimeSpan.Zero);
+        var door = Build.Entity("binary_sensor.pantry_door", "on", now.AddMinutes(-30), "Pantry door", "door");
+        var concern = new Concern
+        {
+            Id = 4,
+            Text = "a door or window left open",
+            Entities = ["binary_sensor.pantry_door"],
+            Rule = new WatchRule(WatchKind.Held, null, "on", TimeSpan.FromMinutes(10)),
+        };
+
+        var finding = Concerns.Evaluate(concern, door, [], now);
+
+        Assert.NotNull(finding);
+        Assert.Contains("Has been open for 30 minutes", finding.Summary);
+        Assert.DoesNotContain("Has been 'on'", finding.Summary);
+        Assert.Contains("\"state_label\":\"open\"", finding.EvidenceJson);
+        Assert.Contains("stays open for more than 10 minutes", finding.EvidenceJson);
+        // The sentence the drafter is handed is the one that must not change.
+        Assert.Contains("stays 'on'", finding.SuggestedRequest);
+    }
+
+    /// <summary>
+    /// The rule on its own has no entity to be worded by, so it keeps the raw state: a concern matched by
+    /// name spans a door and a lamp routinely, and "stays open" would be wrong about the lamp.
+    /// </summary>
+    [Fact]
+    public void A_rule_with_no_entity_in_hand_stays_in_the_raw_state() =>
+        Assert.Equal("stays on for more than 10 minutes", new WatchRule(WatchKind.Held, null, "on", TimeSpan.FromMinutes(10)).Describe());
 }
 
 public class ConcernServiceTests : StoreFixture
@@ -251,6 +287,69 @@ public class ConcernServiceTests : StoreFixture
         Assert.Equal(["sensor.dryer_power"], concern.Entities);
         Assert.Contains("named nothing that exists here", concern.Note);
         Assert.Contains("Nothing here measures the dryer.", concern.Note);
+    }
+
+    /// <summary>
+    /// The guarantee behind the setting: with it on, the scan's tick never reaches the model, however many
+    /// concerns are waiting and however long it has been. Nothing else about the concern changes — it is
+    /// still matched by name, still marked as unread, and still one button away from being read.
+    /// </summary>
+    [Fact]
+    public async Task Nothing_asks_the_model_on_its_own_when_only_when_asked_is_set()
+    {
+        _ha.Entities.Add(Build.Entity("sensor.dryer_power", "0", friendlyName: "Dryer power", deviceClass: "power", unit: "W"));
+        _llm.Response = null;
+
+        var settings = new FakeSettings();
+        settings.Current.Llm.Model = "fake";
+        settings.Current.Llm.OnlyWhenAsked = true;
+        var service = new ConcernService(_ha, _llm, Store, settings, Clock, NullLogger<ConcernService>.Instance);
+
+        // Adding one is the user asking, so the model is still tried.
+        var concern = await service.AddAsync("dryer power", CancellationToken.None);
+        Assert.Equal(1, _llm.Calls);
+        Assert.True(concern.Provisional);
+        Assert.Contains("press Read again", concern.Note);
+        Assert.DoesNotContain("It will be read again", concern.Note);
+
+        // The model comes back, and a day of ticks goes by without anyone noticing.
+        _llm.Response = """{"entity_ids":["sensor.dryer_power"],"kind":"above","value":1500,"explanation":"Watching the dryer."}""";
+        for (var tick = 0; tick < 24; tick++)
+        {
+            Clock.Advance(TimeSpan.FromHours(1));
+            Assert.Equal(0, await service.ReadPendingAsync(CancellationToken.None));
+        }
+
+        Assert.Equal(1, _llm.Calls);
+        Assert.True((await Store.GetConcernAsync(concern.Id, CancellationToken.None))!.Provisional);
+
+        // And the button is still the button.
+        var read = await service.ReadAgainAsync(concern.Id, CancellationToken.None);
+        Assert.Equal(2, _llm.Calls);
+        Assert.NotNull(read);
+        Assert.True(read.Interpreted);
+        Assert.False(read.Provisional);
+    }
+
+    /// <summary>With it off, the tick reads the concern as it always has. The setting is the only difference.</summary>
+    [Fact]
+    public async Task The_tick_still_reads_a_pending_concern_when_it_is_not_set()
+    {
+        _ha.Entities.Add(Build.Entity("sensor.dryer_power", "0", friendlyName: "Dryer power", deviceClass: "power", unit: "W"));
+        _llm.Response = null;
+
+        var settings = new FakeSettings();
+        settings.Current.Llm.Model = "fake";
+        var service = new ConcernService(_ha, _llm, Store, settings, Clock, NullLogger<ConcernService>.Instance);
+
+        var concern = await service.AddAsync("dryer power", CancellationToken.None);
+        Assert.True(concern.Provisional);
+        Assert.Contains("It will be read again", concern.Note);
+
+        _llm.Response = """{"entity_ids":["sensor.dryer_power"],"kind":"above","value":1500,"explanation":"Watching the dryer."}""";
+        Clock.Advance(TimeSpan.FromHours(1));
+
+        Assert.Equal(1, await service.ReadPendingAsync(CancellationToken.None));
     }
 
     [Fact]

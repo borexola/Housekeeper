@@ -47,5 +47,9 @@ Thumbs.db
 # local preview scratch
 .preview/
 .claude/
+# Belt and braces, as with the secrets above: .claude/ already covers this, but the agent's memory is
+# notes about one person working on one machine -- what they have asked for, how they want to be worked
+# with -- and it must stay uncommittable even if .claude/ is ever narrowed to share launch.json.
+.claude/memory/
 /settings.json
 *.db-journal

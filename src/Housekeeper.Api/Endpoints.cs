@@ -651,7 +651,7 @@ public static class Endpoints
         proposal.Description,
         Node(proposal.ConfigJson),
         proposal.ConfigJson is null ? null : SafeYaml(proposal.ConfigJson),
-        AutomationNarrator.Describe(proposal.ConfigJson, names.NameOf),
+        AutomationNarrator.Describe(proposal.ConfigJson, names.NameOf, id => names.About(id)?.DeviceClass),
         proposal.Entities,
         proposal.Actions,
         proposal.Duplicates,
@@ -667,7 +667,7 @@ public static class Endpoints
         concern.Text,
         concern.Entities,
         [.. concern.Entities.Select(id => names.NameOf(id) ?? id)],
-        concern.Rule.Describe(),
+        concern.Rule.Describe(RuleLabel(concern, names)),
         concern.Rule.Kind != WatchKind.Any,
         concern.Explanation,
         concern.Interpreted,
@@ -675,6 +675,27 @@ public static class Endpoints
         concern.Provisional,
         !concern.Interpreted,
         concern.CreatedUtc);
+
+    /// <summary>
+    /// A held-state rule said in the words the entities it watches use, but only where they all use the
+    /// same ones: "stays on" covers a door and a lamp, "stays open" is wrong about the lamp, and a concern
+    /// matched by name alone routinely spans both. Null leaves the rule in the raw state, which is at
+    /// least never wrong about any of them.
+    /// </summary>
+    private static string? RuleLabel(Concern concern, NameBook names)
+    {
+        if (concern.Rule.State is not { } state) return null;
+
+        string? agreed = null;
+        foreach (var entityId in concern.Entities)
+        {
+            var label = names.LabelFor(entityId, state);
+            if (agreed is null) agreed = label;
+            else if (!string.Equals(agreed, label, StringComparison.Ordinal)) return null;
+        }
+
+        return agreed;
+    }
 
     internal static AnomalyView View(Anomaly anomaly) => new(
         anomaly.Id,

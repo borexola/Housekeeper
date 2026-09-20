@@ -17,7 +17,11 @@ namespace Housekeeper.Api;
 public sealed class NameBook
 {
     /// <summary>What is worth knowing about an entity by id when the entity itself is not to hand.</summary>
-    public sealed record Known(string? Name, string? Device, string? Area);
+    /// <param name="DeviceClass">
+    /// Kept because it is what decides how a state is worded -- "open" against "on" -- and the concerns
+    /// page words a rule about entities it is holding nothing else of.
+    /// </param>
+    public sealed record Known(string? Name, string? Device, string? Area, string? DeviceClass = null);
 
     private readonly ConcurrentDictionary<string, Known> _known = new(StringComparer.Ordinal);
 
@@ -25,14 +29,22 @@ public sealed class NameBook
 
     public string? NameOf(string entityId) => _known.TryGetValue(entityId, out var known) ? known.Name : null;
 
+    /// <summary>
+    /// A state said the way Home Assistant says it for this entity, or the raw state when the entity has
+    /// not been seen yet. Everything that reads a state to a person goes through here or through
+    /// <see cref="HaEntity.StateLabel"/>; nothing that writes an automation does.
+    /// </summary>
+    public string LabelFor(string entityId, string state) =>
+        Ha.StateLabel(Ha.DomainOf(entityId), About(entityId)?.DeviceClass, state);
+
     public Known? About(string entityId) => _known.TryGetValue(entityId, out var known) ? known : null;
 
     public void Remember(IReadOnlyList<HaEntity> entities)
     {
         foreach (var entity in entities)
         {
-            var known = new Known(Trim(entity.FriendlyName), Trim(entity.DeviceName), Trim(entity.Area));
-            if (known.Name is null && known.Device is null && known.Area is null) continue;
+            var known = new Known(Trim(entity.FriendlyName), Trim(entity.DeviceName), Trim(entity.Area), Trim(entity.DeviceClass));
+            if (known.Name is null && known.Device is null && known.Area is null && known.DeviceClass is null) continue;
             _known[entity.EntityId] = known;
         }
     }

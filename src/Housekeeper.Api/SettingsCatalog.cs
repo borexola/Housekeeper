@@ -117,6 +117,14 @@ public static class SettingsCatalog
             + "Ollama needs a name; Test connection lists what it has.",
             SettingKind.Text, o => o.Llm.Model),
 
+        new("Housekeeper:Llm:OnlyWhenAsked", "Llm", "Only ask the model when I do",
+            "With this on, nothing in Housekeeper contacts the model unless you pressed something: drafting, "
+            + "refining and Read again all work as they do now, and the background retry stops. The only thing "
+            + "it turns off is the scan tick re-reading a concern the model has not managed to read yet — one "
+            + "per tick, backing off to hourly, and nothing at all once they have all been read. Turn it on if "
+            + "you would rather have the guarantee than the arithmetic.",
+            SettingKind.Bool, o => o.Llm.OnlyWhenAsked),
+
         new("Housekeeper:Llm:Timeout", "Llm", "Timeout",
             "A 7B model on CPU is slow, so this is generous on purpose. Try 90s.",
             SettingKind.Duration, o => o.Llm.Timeout),
