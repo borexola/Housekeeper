@@ -180,69 +180,69 @@ public static class Coverage
         switch (wanted)
         {
             case WatchKind.Above or WatchKind.Below:
-            {
-                // The entity's own reading: not an attribute, and not a template's arithmetic on it. A
-                // sensor's device trigger is a numeric trigger under another name.
-                var reading = trigger.Attribute is null && !trigger.ValueTemplate &&
-                              (trigger.Kind == "numeric_state" || (trigger.Kind == "device" && trigger.Domain == "sensor"));
-                if (!reading || entity.Numeric is not { } current) return null;
-
-                // A line that cannot be read now -- an input_number that is unavailable, say -- is no line.
-                var above = Line(trigger.Above, known);
-                var below = Line(trigger.Below, known);
-                if ((trigger.Above is not null && above is null) || (trigger.Below is not null && below is null)) return null;
-
-                var unit = string.IsNullOrWhiteSpace(entity.Unit) ? "" : " " + entity.Unit;
-
-                // Home Assistant fires as the reading crosses the line, so one it is already past has fired,
-                // or will once its for: is up; given both lines it fires only between them. The for: is said
-                // rather than checked: a reading changes by the minute, so how long it has been past the line
-                // is not something the entity's own state records.
-                if (wanted == WatchKind.Above)
-                    return above is { } line && current > line && (below is not { } top || current < top)
-                        ? $"fires when {name} goes above {Ha.Number(line)}{unit}{wait}"
-                        : null;
-
-                return below is { } floor && current < floor && (above is not { } bottom || current > bottom)
-                    ? $"fires when {name} drops below {Ha.Number(floor)}{unit}{wait}"
-                    : null;
-            }
-
-            case WatchKind.Held:
-            {
-                // Without a for: it fires the moment the state changes, which says nothing about the state
-                // being held too long. With one, it has to have run out already.
-                if (trigger.For is not { } held || held > since) return null;
-
-                if (trigger.Kind == "state")
                 {
-                    if (trigger.Attribute is not null) return null;
-                    if (trigger.To is { } to && !to.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
-                    if (trigger.NotTo is { } notTo && notTo.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
+                    // The entity's own reading: not an attribute, and not a template's arithmetic on it. A
+                    // sensor's device trigger is a numeric trigger under another name.
+                    var reading = trigger.Attribute is null && !trigger.ValueTemplate &&
+                                  (trigger.Kind == "numeric_state" || (trigger.Kind == "device" && trigger.Domain == "sensor"));
+                    if (!reading || entity.Numeric is not { } current) return null;
 
-                    return trigger.To is null
-                        ? $"fires when {name} has not changed for {Ha.Duration(held)}"
-                        : $"fires when {name} stays {entity.StateLabel} for {Ha.Duration(held)}";
+                    // A line that cannot be read now -- an input_number that is unavailable, say -- is no line.
+                    var above = Line(trigger.Above, known);
+                    var below = Line(trigger.Below, known);
+                    if ((trigger.Above is not null && above is null) || (trigger.Below is not null && below is null)) return null;
+
+                    var unit = string.IsNullOrWhiteSpace(entity.Unit) ? "" : " " + entity.Unit;
+
+                    // Home Assistant fires as the reading crosses the line, so one it is already past has fired,
+                    // or will once its for: is up; given both lines it fires only between them. The for: is said
+                    // rather than checked: a reading changes by the minute, so how long it has been past the line
+                    // is not something the entity's own state records.
+                    if (wanted == WatchKind.Above)
+                        return above is { } line && current > line && (below is not { } top || current < top)
+                            ? $"fires when {name} goes above {Ha.Number(line)}{unit}{wait}"
+                            : null;
+
+                    return below is { } floor && current < floor && (above is not { } bottom || current > bottom)
+                        ? $"fires when {name} drops below {Ha.Number(floor)}{unit}{wait}"
+                        : null;
                 }
 
-                return trigger.Kind == "device" && StateOf(trigger.Type) is { } fires &&
-                       string.Equals(fires, entity.State, StringComparison.OrdinalIgnoreCase)
-                    ? $"fires when {name} stays {entity.StateLabel} for {Ha.Duration(held)}"
-                    : null;
-            }
+            case WatchKind.Held:
+                {
+                    // Without a for: it fires the moment the state changes, which says nothing about the state
+                    // being held too long. With one, it has to have run out already.
+                    if (trigger.For is not { } held || held > since) return null;
+
+                    if (trigger.Kind == "state")
+                    {
+                        if (trigger.Attribute is not null) return null;
+                        if (trigger.To is { } to && !to.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
+                        if (trigger.NotTo is { } notTo && notTo.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
+
+                        return trigger.To is null
+                            ? $"fires when {name} has not changed for {Ha.Duration(held)}"
+                            : $"fires when {name} stays {entity.StateLabel} for {Ha.Duration(held)}";
+                    }
+
+                    return trigger.Kind == "device" && StateOf(trigger.Type) is { } fires &&
+                           string.Equals(fires, entity.State, StringComparison.OrdinalIgnoreCase)
+                        ? $"fires when {name} stays {entity.StateLabel} for {Ha.Duration(held)}"
+                        : null;
+                }
 
             case WatchKind.Unavailable:
-            {
-                // Only a state trigger told to fire on that very state. One without a to: fires on every
-                // change and was written for something else, and a numeric or device trigger never fires on
-                // a sensor that has stopped reporting -- which is the whole of what this finding is about.
-                if (trigger.Kind != "state" || trigger.Attribute is not null || !entity.IsUnavailable) return null;
-                if (trigger.To is not { } to || !to.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
-                if (trigger.NotTo is { } notTo && notTo.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
-                if (trigger.For is { } held && held > since) return null;
+                {
+                    // Only a state trigger told to fire on that very state. One without a to: fires on every
+                    // change and was written for something else, and a numeric or device trigger never fires on
+                    // a sensor that has stopped reporting -- which is the whole of what this finding is about.
+                    if (trigger.Kind != "state" || trigger.Attribute is not null || !entity.IsUnavailable) return null;
+                    if (trigger.To is not { } to || !to.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
+                    if (trigger.NotTo is { } notTo && notTo.Contains(entity.State, StringComparer.OrdinalIgnoreCase)) return null;
+                    if (trigger.For is { } held && held > since) return null;
 
-                return $"fires when {name} becomes {entity.StateLabel}{wait}";
-            }
+                    return $"fires when {name} becomes {entity.StateLabel}{wait}";
+                }
 
             default:
                 return null;
