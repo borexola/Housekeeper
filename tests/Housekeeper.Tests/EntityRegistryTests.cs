@@ -42,6 +42,20 @@ public class EntityRegistryTests
         Assert.True(registry["sensor.integration_hid_this"].Hidden);
     }
 
+    /// <summary>A device trigger built in the editor names its entity by the registry's own id, so that has to come out too.</summary>
+    [Fact]
+    public void Reads_the_registry_id_a_device_trigger_names_an_entity_by()
+    {
+        var registry = EntityRegistry.Parse("""
+            {"id":1,"type":"result","success":true,"result":[
+              {"entity_id":"sensor.bedroom_temperature","id":"3b1f0c2d9e8a7b6c5d4e3f2a1b0c9d8e","entity_category":null,"hidden_by":null},
+              {"entity_id":"sensor.no_id_given","entity_category":null,"hidden_by":null}]}
+            """);
+
+        Assert.Equal("3b1f0c2d9e8a7b6c5d4e3f2a1b0c9d8e", registry["sensor.bedroom_temperature"].Id);
+        Assert.Null(registry["sensor.no_id_given"].Id);
+    }
+
     /// <summary>A registry that gains a field must not stop Housekeeper reading the fields it understood.</summary>
     [Theory]
     [InlineData("""{"id":1,"type":"result","success":true,"result":[]}""")]

@@ -28,16 +28,29 @@ public sealed class HomeAssistantClient(
     /// <summary>How many automation configs to read at once when describing what already exists.</summary>
     private const int ConfigReadConcurrency = 6;
 
-    /// <summary>
-    /// How long the automation configs and the service list are trusted before being re-read. Both change
-    /// rarely, and re-reading a hundred automation configs on every draft was the slowest step after the
-    /// model itself. Automations added or removed are noticed at once regardless, because the automations
-    /// cache is keyed on the set of ids.
-    /// </summary>
+    /// <summary>How long the service list is trusted before being re-read. It changes when an integration is added.</summary>
     private static readonly TimeSpan CacheFor = TimeSpan.FromMinutes(5);
 
-    private readonly Cached<IReadOnlyList<ExistingAutomation>> _automations = new(clock, CacheFor);
+    /// <summary>
+    /// How long the automation configs are trusted before being read again regardless.
+    ///
+    /// Reading them is one request per automation, and Home Assistant re-parses the whole automations file
+    /// for every one of those: a sweep of a hundred automations parses a hundred-automation file a hundred
+    /// times. It rarely needs to: the cache is keyed on each automation's config id and the moment its entity last
+    /// changed, which moves when an automation is added, removed, switched on or off, or edited -- Home
+    /// Assistant reloads an edited automation, and a reloaded automation is a new entity state. The hour
+    /// only catches what that cannot see, such as a device moved to another area.
+    /// </summary>
+    private static readonly TimeSpan AutomationsFreshFor = TimeSpan.FromHours(1);
+
+    private readonly Cached<Sweep> _automations = new(clock, AutomationsFreshFor);
     private readonly Cached<IReadOnlySet<string>> _services = new(clock, CacheFor);
+
+    /// <summary>
+    /// The automations one read found, and whether it found all it could: a sweep in which some configs
+    /// timed out or failed is used, but not kept, so the next caller asks again rather than inheriting the gaps.
+    /// </summary>
+    private sealed record Sweep(IReadOnlyList<ExistingAutomation> Automations, bool Complete);
 
     /// <summary>
     /// The entity registry, held longer than the rest. It changes when a device is added or renamed, and a
@@ -131,7 +144,7 @@ public sealed class HomeAssistantClient(
             var categories = await EntityCategoriesAsync(cancellationToken).ConfigureAwait(false);
             if (categories.Count > 0)
                 entities = [.. entities.Select(e => categories.TryGetValue(e.EntityId, out var found)
-                    ? e with { EntityCategory = found.EntityCategory, Hidden = found.Hidden }
+                    ? e with { EntityCategory = found.EntityCategory, Hidden = found.Hidden, RegistryId = found.Id }
                     : e)];
         }
 
@@ -186,22 +199,31 @@ public sealed class HomeAssistantClient(
         return registry;
     }
 
-    public Task<IReadOnlyList<ExistingAutomation>> GetAutomationsAsync(
+    public async Task<IReadOnlyList<ExistingAutomation>> GetAutomationsAsync(
         IReadOnlyList<HaEntity> entities,
         CancellationToken cancellationToken)
     {
         // The caller already fetched every state; the automation entities in it carry their config ids.
         var identified = entities
             .Where(entity => entity.AutomationConfigId is not null)
-            .Select(entity => (ConfigId: entity.AutomationConfigId!, entity.EntityId, Alias: entity.FriendlyName ?? entity.EntityId))
+            .Select(entity => (ConfigId: entity.AutomationConfigId!, entity.EntityId, Alias: entity.FriendlyName ?? entity.EntityId, entity.LastChanged))
             .ToList();
 
-        var key = string.Join("\n", identified.Select(pair => pair.ConfigId).Order(StringComparer.Ordinal));
-        return _automations.GetAsync(key, () => ReadAllAsync(identified, entities, cancellationToken), cancellationToken);
+        // Keyed on the address too: pointing Housekeeper at another Home Assistant must not describe its
+        // automations with the last one's configs, however alike their ids.
+        var key = (settings.Current.HomeAssistant.BaseUrl ?? "") + "\n" + string.Join("\n", identified
+            .Select(pair => pair.ConfigId + "@" + pair.LastChanged.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture))
+            .Order(StringComparer.Ordinal));
+
+        var sweep = await _automations
+            .GetAsync(key, () => ReadAllAsync(identified, entities, cancellationToken), read => read.Complete, cancellationToken)
+            .ConfigureAwait(false);
+
+        return sweep.Automations;
     }
 
-    private async Task<IReadOnlyList<ExistingAutomation>> ReadAllAsync(
-        List<(string ConfigId, string EntityId, string Alias)> identified,
+    private async Task<Sweep> ReadAllAsync(
+        List<(string ConfigId, string EntityId, string Alias, DateTimeOffset LastChanged)> identified,
         IReadOnlyList<HaEntity> entities,
         CancellationToken cancellationToken)
     {
@@ -222,17 +244,19 @@ public sealed class HomeAssistantClient(
         });
 
         var refused = 0;
+        var failed = 0;
         foreach (var read in await Task.WhenAll(reads).ConfigureAwait(false))
         {
             if (read.Automation is not null) automations.Add(read.Automation);
             if (read.Refused) refused++;
+            if (read.Failed) failed++;
         }
 
         // One unreadable automation costs duplicate detection against that automation. Every one of them
         // unreadable means something systematic -- most often a token that is not an admin's, since this
         // endpoint requires one -- and returning an empty list for that says "this house has no automations",
-        // which is cached as fact for five minutes and quietly turns duplicate detection off. Saying so out
-        // loud instead means nothing is cached and the drafting log explains why the check did not run.
+        // which would be kept as fact and quietly turn duplicate detection off. Saying so out loud instead
+        // means nothing is kept and the drafting log explains why the check did not run.
         // Only a refusal is worth raising. A 404 here is ordinary and expected: the config endpoint serves
         // the automations Home Assistant's own editor stores, so one written by hand in configuration.yaml
         // answers 404 forever. Blaming the token for that told a house full of YAML automations to fix a
@@ -243,7 +267,9 @@ public sealed class HomeAssistantClient(
                 + "configs needs a long-lived token belonging to an admin user; without one, Housekeeper cannot "
                 + "tell you when a draft duplicates something you already have.");
 
-        return automations;
+        // A config that timed out or failed is a gap in this answer, not a fact about the house: the answer is
+        // used, and not kept, so the next caller asks again rather than inheriting the gap for an hour.
+        return new Sweep(automations, Complete: failed == 0 && refused == 0);
     }
 
     public Task<IReadOnlySet<string>> GetServicesAsync(CancellationToken cancellationToken) =>
@@ -299,8 +325,11 @@ public sealed class HomeAssistantClient(
         return id;
     }
 
-    /// <summary>One automation's config, and whether Home Assistant refused to hand it over at all.</summary>
-    private readonly record struct ConfigRead(ExistingAutomation? Automation, bool Refused);
+    /// <summary>
+    /// One automation's config; whether Home Assistant refused to hand it over at all; and whether asking
+    /// failed in a way that asking again might not -- a timeout, a dropped connection, a server error.
+    /// </summary>
+    private readonly record struct ConfigRead(ExistingAutomation? Automation, bool Refused, bool Failed = false);
 
     /// <summary>An area's id as Home Assistant makes it from the name: lower case, runs of anything else as one underscore.</summary>
     internal static string Slug(string name)
@@ -324,6 +353,31 @@ public sealed class HomeAssistantClient(
         return chars.ToString().TrimEnd('_');
     }
 
+    /// <summary>
+    /// A set of entity ids with any areas and devices in it opened out into the entities that are in them,
+    /// as far as this house's own list can say. Both are matched on the registry's own ids, which a rename
+    /// does not change.
+    /// </summary>
+    private static HashSet<string> Widen(
+        IReadOnlySet<string> named,
+        IReadOnlySet<string> areas,
+        IReadOnlySet<string> devices,
+        IReadOnlyList<HaEntity> entities)
+    {
+        HashSet<string> widened = new(named, StringComparer.Ordinal);
+        if (areas.Count == 0 && devices.Count == 0) return widened;
+
+        foreach (var entity in entities)
+            if ((entity.DeviceId is { } device && devices.Contains(device)) ||
+                (entity.AreaId is { } areaId && areas.Contains(areaId)) ||
+                // Only when the registry did not say: an area's id is fixed at creation, so slugging the
+                // name it carries now is wrong the moment the area is renamed.
+                (entity.AreaId is null && entity.Area is { } area && areas.Contains(Slug(area))))
+                widened.Add(entity.EntityId);
+
+        return widened;
+    }
+
     private async Task<ConfigRead> ReadAutomationAsync(
         string configId,
         string entityId,
@@ -343,13 +397,16 @@ public sealed class HomeAssistantClient(
             {
                 // A 404 is ordinary: this endpoint only serves what Home Assistant's own editor stores, so an
                 // automation written by hand in configuration.yaml answers 404 for ever and there is nothing
-                // wrong. A 401 or 403 is not ordinary -- it is the whole feature off.
+                // wrong. A 401 or 403 is not ordinary -- it is the whole feature off. Anything else is Home
+                // Assistant, or something in front of it, failing this once.
                 var refused = response.Status is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
+                var missing = response.Status is HttpStatusCode.NotFound;
 
                 if (refused) logger.LogWarning("Home Assistant refused the config for {EntityId}: HTTP {Status}.", entityId, (int)response.Status);
-                else logger.LogDebug("No stored config for {EntityId}: HTTP {Status}.", entityId, (int)response.Status);
+                else if (missing) logger.LogDebug("No stored config for {EntityId}: HTTP {Status}.", entityId, (int)response.Status);
+                else logger.LogWarning("Could not read the config for {EntityId}: HTTP {Status}.", entityId, (int)response.Status);
 
-                return new ConfigRead(null, refused);
+                return new ConfigRead(null, refused, Failed: !refused && !missing);
             }
 
             using var document = JsonDocument.Parse(response.Body);
@@ -357,16 +414,10 @@ public sealed class HomeAssistantClient(
 
             // An automation built in the editor often targets an area or a device rather than entities.
             // Those are the entities in that area and on that device, as far as this house's own list can
-            // say: both are matched on the registry's own ids, which a rename does not change.
-            HashSet<string> touched = new(inspection.Entities, StringComparer.Ordinal);
-            if (inspection.Areas.Count > 0 || inspection.Devices.Count > 0)
-                foreach (var entity in entities)
-                    if ((entity.DeviceId is { } device && inspection.Devices.Contains(device)) ||
-                        (entity.AreaId is { } areaId && inspection.Areas.Contains(areaId)) ||
-                        // Only when the registry did not say: an area's id is fixed at creation, so slugging
-                        // the name it carries now is wrong the moment the area is renamed.
-                        (entity.AreaId is null && entity.Area is { } area && inspection.Areas.Contains(Slug(area))))
-                        touched.Add(entity.EntityId);
+            // say: both are matched on the registry's own ids, which a rename does not change. This is what
+            // it touches, for comparing a draft against it; what it fires on is its triggers, taken as they
+            // are written, because a trigger on one sensor of a multisensor does not fire on the others.
+            HashSet<string> touched = Widen(inspection.Entities, inspection.Areas, inspection.Devices, entities);
 
             var configAlias = document.RootElement.ValueKind == JsonValueKind.Object &&
                               document.RootElement.TryGetProperty("alias", out var aliasElement) &&
@@ -374,13 +425,15 @@ public sealed class HomeAssistantClient(
                 ? aliasElement.GetString() ?? alias
                 : alias;
 
-            return new ConfigRead(new ExistingAutomation(configId, entityId, configAlias, touched, inspection.TriggerKinds), false);
+            return new ConfigRead(
+                new ExistingAutomation(configId, entityId, configAlias, touched, inspection.TriggerKinds, inspection.Triggers, inspection.HasConditions),
+                false);
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or HomeAssistantException)
         {
             // One unreadable automation costs duplicate detection against it, nothing more.
             logger.LogWarning(ex, "Skipping automation {EntityId}: could not read its config.", entityId);
-            return new ConfigRead(null, false);
+            return new ConfigRead(null, false, Failed: ex is not JsonException);
         }
     }
 
@@ -623,14 +676,21 @@ public sealed class HomeAssistantClient(
         private string? _key;
         private DateTimeOffset _expires = DateTimeOffset.MinValue;
 
-        public async Task<T> GetAsync(string key, Func<Task<T>> load, CancellationToken cancellationToken)
+        public Task<T> GetAsync(string key, Func<Task<T>> load, CancellationToken cancellationToken) =>
+            GetAsync(key, load, _ => true, cancellationToken);
+
+        /// <param name="keep">Whether a value just loaded is fit to hand to the next caller, or only to this one.</param>
+        public async Task<T> GetAsync(string key, Func<Task<T>> load, Func<T, bool> keep, CancellationToken cancellationToken)
         {
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
                 if (_value is not null && _key == key && clock.GetUtcNow() < _expires) return _value;
 
-                _value = await load().ConfigureAwait(false);
+                var loaded = await load().ConfigureAwait(false);
+                if (!keep(loaded)) return loaded;
+
+                _value = loaded;
                 _key = key;
                 _expires = clock.GetUtcNow() + keepFor;
                 return _value;

@@ -488,7 +488,8 @@ public class ScannerLifecycleTests : StoreFixture
 
         _ha.Automations.Add(new ExistingAutomation("1", "automation.pantry", "Pantry",
             new HashSet<string>(StringComparer.Ordinal) { "light.pantry", "binary_sensor.pantry_motion" },
-            new HashSet<string>(StringComparer.Ordinal) { "state" }));
+            new HashSet<string>(StringComparer.Ordinal) { "state" },
+            []));
         Clock.Advance(TimeSpan.FromMinutes(61));
         await scanner.ScanAsync(CancellationToken.None);
 
@@ -505,7 +506,8 @@ public class ScannerLifecycleTests : StoreFixture
         _ha.Entities.Add(Build.Entity("automation.something", "on", Clock.GetUtcNow(), automationConfigId: "1"));
         _ha.Automations.Add(new ExistingAutomation("1", "automation.something", "Something",
             new HashSet<string>(StringComparer.Ordinal) { "light.pantry", "binary_sensor.pantry_motion" },
-            new HashSet<string>(StringComparer.Ordinal) { "state" }));
+            new HashSet<string>(StringComparer.Ordinal) { "state" },
+            []));
         var scanner = Scanner(Options("light.pantry", "binary_sensor.pantry_motion"));
 
         await scanner.ScanAsync(CancellationToken.None);

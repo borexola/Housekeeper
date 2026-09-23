@@ -112,6 +112,47 @@ public sealed class AnomalyScanner(
     /// </summary>
     private bool _sawAutomations;
 
+    /// <summary>
+    /// The existing automations as last read successfully, when, and the last-changed time each automation's
+    /// entity had then. Kept across scans: automations change rarely, and one read that fails must not unsay
+    /// what an earlier one found.
+    /// </summary>
+    private (IReadOnlyList<ExistingAutomation> List, IReadOnlyDictionary<string, DateTimeOffset> Changed, DateTimeOffset AtUtc)? _automations;
+
+    /// <summary>The last read of the automations that failed, and why. Nothing asks again until <see cref="AutomationsRetryAfter"/> has passed.</summary>
+    private (DateTimeOffset AtUtc, string Reason)? _automationsFailed;
+
+    /// <summary>
+    /// How long after a failed read nothing asks again. A read is one request per automation, and when Home
+    /// Assistant refuses them -- a token that is not an admin's -- every one is logged there as a failed
+    /// login, and can get this address banned. The hour is the routine search's own cadence, so a refused
+    /// token costs what it did before anything else read the automations.
+    /// </summary>
+    private static readonly TimeSpan AutomationsRetryAfter = TimeSpan.FromHours(1);
+
+    /// <summary>
+    /// How long one read of every automation config is given, all told. Each request has its own timeout,
+    /// but a scan waits on the whole sweep, and a config endpoint that has stopped answering would otherwise
+    /// hold the scan for one timeout per six automations.
+    /// </summary>
+    private static readonly TimeSpan AutomationsDeadline = TimeSpan.FromMinutes(1);
+
+    /// <summary>
+    /// How long automations read successfully go on being used while every newer read fails. Past this they
+    /// are too old to tell anyone what they are covered by, and the cards stop saying.
+    /// </summary>
+    private static readonly TimeSpan AutomationsTrustedFor = TimeSpan.FromHours(6);
+
+    /// <summary>How long a state list with no automations in it is taken for Home Assistant restarting, as far as the cards are concerned.</summary>
+    private static readonly TimeSpan RestartTakesAtMost = TimeSpan.FromMinutes(30);
+
+    /// <summary>
+    /// The existing automations and the entity states taken with them, for the Noticed page to work out --
+    /// when it is asked, not when a finding was last raised -- whether an automation already fires on each
+    /// open finding. Null when no open finding could use them, or they could not be read.
+    /// </summary>
+    public KnownAutomations? Automations { get; private set; }
+
     /// <summary>The last search for routines: when, over how much, and what came of it. Null until one has run.</summary>
     public HabitSearch? LastRoutineSearch { get; private set; }
 
@@ -214,6 +255,18 @@ public sealed class AnomalyScanner(
 
         var entities = await homeAssistant.GetEntitiesAsync(cancellationToken).ConfigureAwait(false);
         var raised = 0;
+
+        // A state list with no automations in it, on a house that had them, is Home Assistant mid-restart
+        // rather than a house that deleted every automation. Nothing about the automations is concluded
+        // from it: the routine search waits, and what was known about them before stands.
+        var listsAutomations = entities.Any(entity => entity.Domain == "automation");
+        var restarting = !listsAutomations && _sawAutomations;
+        if (listsAutomations) _sawAutomations = true;
+
+        // The existing automations, read at most once this scan, and only by something that needs them.
+        Task<IReadOnlyList<ExistingAutomation>?>? automationsRead = null;
+        Task<IReadOnlyList<ExistingAutomation>?> ExistingAutomations() =>
+            automationsRead ??= ReadAutomationsAsync(entities, now, cancellationToken);
 
         // Every condition still true this minute. Whatever is open and missing from it has passed.
         HashSet<string> standing = new(StringComparer.Ordinal);
@@ -321,10 +374,12 @@ public sealed class AnomalyScanner(
             }
         }
 
-        var habits = await LearnHabitsAsync(entities, watched, scan, standing, now, cancellationToken).ConfigureAwait(false);
+        var habits = await LearnHabitsAsync(entities, watched, scan, standing, restarting, ExistingAutomations, now, cancellationToken).ConfigureAwait(false);
 
         var resolved = await ResolveAsync(open, standing, resolvable, numericJudgeable, absorbed, watched, entities, concerns, habits, now, cancellationToken)
             .ConfigureAwait(false);
+
+        await KnowAutomationsAsync(entities, restarting, ExistingAutomations, now, cancellationToken).ConfigureAwait(false);
 
         // Pruning happens whatever is being watched. Narrowing the watch list used to leave the samples of
         // everything dropped from it sitting in the database for good.
@@ -551,6 +606,110 @@ public sealed class AnomalyScanner(
     /// condition it described stopped being true.
     /// </summary>
     public const string ClosedBecause = "closed_because";
+
+    /// <summary>
+    /// Keeps <see cref="Automations"/> current for the Noticed page, which uses it to say when an automation
+    /// the user already has fires on a finding -- before offering to have the model draft a second one.
+    ///
+    /// Nothing is read unless an open finding could use it: a house whose findings are all dismissed, or all
+    /// routines, pays nothing. Coverage itself is worked out when the page asks rather than stored on each
+    /// finding, so a card never goes on naming an automation deleted or switched off since, and a finding
+    /// the scan kept open without raising again is answered from the same fresh states as the rest.
+    /// </summary>
+    private async Task KnowAutomationsAsync(
+        IReadOnlyList<HaEntity> entities,
+        bool restarting,
+        Func<Task<IReadOnlyList<ExistingAutomation>?>> readAutomations,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        // Mid-restart every automation is missing from the state list, and would read as switched off. What
+        // was known before the restart is still the best answer, so it is left as it was -- for as long as a
+        // restart takes. One that has gone on longer is a house whose automations have gone.
+        if (restarting)
+        {
+            if (Automations is { } held && now - held.SeenUtc > RestartTakesAtMost) Automations = null;
+            return;
+        }
+
+        var open = await store.ListAnomaliesAsync(AnomalyStatus.Open, OpenFindingCeiling, includeClosed: false, cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!open.Any(finding => Coverage.Wanted(finding) is not null))
+        {
+            Automations = null;
+            return;
+        }
+
+        await readAutomations().ConfigureAwait(false);
+
+        // A failed read leaves the last good one in use, for a while. Automations change rarely, and the
+        // entity states taken now still say which of them exist and are switched on.
+        Automations = _automations is { } known && now - known.AtUtc < AutomationsTrustedFor
+            ? new KnownAutomations(known.List, entities, known.AtUtc, now)
+            : null;
+    }
+
+    /// <summary>
+    /// Reads the existing automations, for the routine search and for the Noticed page alike. Null when they
+    /// could not be read, or a read has failed within the hour.
+    ///
+    /// An automation that still exists but could not be read this time, and has not changed since it last
+    /// was, keeps its last reading. A config request that timed out is not an automation deleted, and
+    /// dropping it would have every card it covers offer to build it again until the next good read.
+    /// </summary>
+    private async Task<IReadOnlyList<ExistingAutomation>?> ReadAutomationsAsync(
+        IReadOnlyList<HaEntity> entities,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (_automationsFailed is { } failed && now - failed.AtUtc < AutomationsRetryAfter) return null;
+
+        using var deadline = new CancellationTokenSource(AutomationsDeadline, clock);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, deadline.Token);
+
+        IReadOnlyList<ExistingAutomation> read;
+        try
+        {
+            read = await homeAssistant.GetAutomationsAsync(entities, linked.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return Failed($"Home Assistant did not hand over the automation configs within {Ha.Duration(AutomationsDeadline)}.", null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return Failed(ex.Message, ex);
+        }
+
+        var changed = entities
+            .Where(entity => entity.AutomationConfigId is not null)
+            .GroupBy(entity => entity.EntityId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.First().LastChanged, StringComparer.Ordinal);
+
+        List<ExistingAutomation> list = [.. read];
+        if (_automations is { } before)
+        {
+            var fresh = new HashSet<string>(read.Select(automation => automation.EntityId), StringComparer.Ordinal);
+            foreach (var automation in before.List)
+                if (!fresh.Contains(automation.EntityId) &&
+                    changed.TryGetValue(automation.EntityId, out var lastChanged) &&
+                    before.Changed.TryGetValue(automation.EntityId, out var then) && lastChanged == then)
+                    list.Add(automation);
+        }
+
+        _automations = (list, changed, now);
+        _automationsFailed = null;
+        return list;
+
+        IReadOnlyList<ExistingAutomation>? Failed(string reason, Exception? ex)
+        {
+            _automationsFailed = (now, reason);
+            logger.LogWarning(ex, "Could not read the existing automations; not asking again for {Wait}. {Reason}",
+                Ha.Duration(AutomationsRetryAfter), reason);
+            return null;
+        }
+    }
 
     /// <summary>Writes why a finding was closed into its evidence. Public so every caller that closes one words it the same way.</summary>
     public static string WithReason(string evidenceJson, string reason) =>
@@ -794,6 +953,8 @@ public sealed class AnomalyScanner(
         IReadOnlyList<HaEntity> watched,
         ScanOptions scan,
         HashSet<string> standing,
+        bool restarting,
+        Func<Task<IReadOnlyList<ExistingAutomation>?>> readAutomations,
         DateTimeOffset now,
         CancellationToken cancellationToken)
     {
@@ -806,9 +967,7 @@ public sealed class AnomalyScanner(
         if (_habitsAt is { } at && now - at < HabitCadence) return HabitPass.Skipped;
         if (watched.Count == 0) return HabitPass.Skipped;
 
-        var hasAutomations = entities.Any(entity => entity.Domain == "automation");
-        if (hasAutomations) _sawAutomations = true;
-        else if (_sawAutomations)
+        if (restarting)
         {
             _habitsAt = now;
             LastRoutineSearch = new HabitSearch(now, 0, 0, 0, 0, 0, "Home Assistant listed no automations this scan; waiting for them to come back.");
@@ -816,16 +975,11 @@ public sealed class AnomalyScanner(
             return HabitPass.Skipped;
         }
 
-        IReadOnlyList<ExistingAutomation> automations;
-        try
-        {
-            automations = await homeAssistant.GetAutomationsAsync(entities, cancellationToken).ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        if (await readAutomations().ConfigureAwait(false) is not { } automations)
         {
             _habitsAt = now;
-            LastRoutineSearch = new HabitSearch(now, 0, 0, 0, 0, 0, "The existing automations could not be read: " + ex.Message);
-            logger.LogWarning(ex, "Could not read the existing automations, so routines were not looked for this hour.");
+            LastRoutineSearch = new HabitSearch(now, 0, 0, 0, 0, 0, "The existing automations could not be read: " + _automationsFailed?.Reason);
+            logger.LogWarning("Could not read the existing automations, so routines were not looked for this hour.");
             return HabitPass.Skipped;
         }
 

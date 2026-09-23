@@ -39,7 +39,14 @@ public sealed record HaEntity(
     /// not change when it is renamed. What an automation targets, so it is what an automation is matched on;
     /// <see cref="Area"/> is the name, which is what a person reads.
     /// </summary>
-    string? AreaId = null)
+    string? AreaId = null,
+
+    /// <summary>
+    /// The entity registry's own id for this entity: a 32-character hex string that, unlike the entity id,
+    /// survives a rename. A device trigger built in Home Assistant's editor names its entity by this rather
+    /// than by entity id. Null when the registry could not be read.
+    /// </summary>
+    string? RegistryId = null)
 {
     /// <summary>The part before the first dot, e.g. <c>light</c> for <c>light.kitchen</c>.</summary>
     public string Domain => Ha.DomainOf(EntityId);
@@ -76,13 +83,64 @@ public sealed record HaEntity(
     public string StateLabel => Ha.StateLabel(Domain, DeviceClass, State);
 }
 
-/// <summary>An automation that already exists in Home Assistant, reduced to what duplicate detection needs.</summary>
+/// <summary>
+/// An automation that already exists in Home Assistant, reduced to what duplicate detection, the routine
+/// search and the coverage check need.
+/// </summary>
+/// <param name="Entities">Everything the config names, anywhere in it, with areas and devices widened out.</param>
+/// <param name="TriggerKinds">The <c>trigger:</c> values of its triggers. Empty for a blueprint, whose triggers are its own.</param>
+/// <param name="Triggers">
+/// Each of its triggers, with what decides when it fires. Empty for a blueprint, whose triggers are in the
+/// blueprint rather than the config, and for a record built without reading them: either way nothing can be
+/// said about what it fires on, and nothing is.
+/// </param>
+/// <param name="HasConditions">True when it has conditions, which can stop it acting even when a trigger fires.</param>
 public sealed record ExistingAutomation(
     string Id,
     string EntityId,
     string Alias,
     IReadOnlySet<string> Entities,
-    IReadOnlySet<string> TriggerKinds);
+    IReadOnlySet<string> TriggerKinds,
+    IReadOnlyList<AutomationTrigger> Triggers,
+    bool HasConditions = false);
+
+/// <summary>
+/// One trigger of an existing automation, reduced to what decides when it fires.
+///
+/// Kept one per trigger rather than pooled across the automation, because pooling is how one trigger's kind
+/// came to be paired with another trigger's entity: a numeric trigger on the outdoor thermometer beside a
+/// state trigger on the CO2 sensor read as "triggers on the CO2 reading".
+/// </summary>
+/// <param name="Kind">The <c>trigger:</c> value, or the older <c>platform:</c>: <c>state</c>, <c>numeric_state</c>, <c>device</c>...</param>
+/// <param name="Entities">
+/// Its <c>entity_id</c> values as written, lower-cased. Usually entity ids; a device trigger built in the
+/// editor names its entity by the entity registry's id instead, which <see cref="HaEntity.RegistryId"/> resolves.
+/// </param>
+/// <param name="Enabled">False when it was switched off in the editor (<c>enabled: false</c>), and Home Assistant skips it.</param>
+/// <param name="To">The states a <c>state</c> trigger fires on; null when it fires on any.</param>
+/// <param name="NotTo">States a <c>state</c> trigger is told to ignore.</param>
+/// <param name="For">How long the state or the reading has to hold before it fires. Null when it fires at once.</param>
+/// <param name="ForUnreadable">A <c>for:</c> given as a template, so when it fires cannot be known from here.</param>
+/// <param name="Above">A reading trigger's line, as written: a number, or the entity that holds one.</param>
+/// <param name="Below">Its other line, likewise.</param>
+/// <param name="Attribute">Set when it watches one of the entity's attributes rather than its state.</param>
+/// <param name="ValueTemplate">True when a template, not the state itself, is the value it compares.</param>
+/// <param name="Type">A device trigger's type: <c>turned_on</c>, <c>opened</c>, <c>temperature</c>...</param>
+/// <param name="Domain">A device trigger's domain: <c>sensor</c>, <c>binary_sensor</c>, <c>switch</c>...</param>
+public sealed record AutomationTrigger(
+    string Kind,
+    IReadOnlyList<string> Entities,
+    bool Enabled = true,
+    IReadOnlyList<string>? To = null,
+    IReadOnlyList<string>? NotTo = null,
+    TimeSpan? For = null,
+    bool ForUnreadable = false,
+    string? Above = null,
+    string? Below = null,
+    string? Attribute = null,
+    bool ValueTemplate = false,
+    string? Type = null,
+    string? Domain = null);
 
 /// <summary>A validated automation the model drafted, ready to show the user.</summary>
 public sealed record AutomationDraft(

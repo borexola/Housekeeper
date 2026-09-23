@@ -44,7 +44,12 @@ public sealed record AnomalyView(
     /// <summary>How far past its own bar: 1 at the bar, one more per doubling, capped; missing-entity findings sit above the cap.</summary>
     double Severity,
     /// <summary>How many times the user has dismissed it. Each raises the bar it must clear to return; three silence it.</summary>
-    int Dismissals);
+    int Dismissals,
+    /// <summary>
+    /// For an open finding, the automations the user already has that fire on it, strongest first; empty when
+    /// none does. Null when that is not known -- the automations could not be read, or the finding is closed.
+    /// </summary>
+    IReadOnlyList<CoveringAutomation>? CoveredBy = null);
 
 public sealed record ConcernRequest(string? Text);
 
@@ -415,6 +420,7 @@ public static class Endpoints
             int? limit,
             bool? closed,
             IStore store,
+            AnomalyScanner scanner,
             CancellationToken cancellationToken) =>
         {
             if (!TryParse<AnomalyStatus>(status, out var parsed))
@@ -424,9 +430,13 @@ public static class Endpoints
                 .ListAnomaliesAsync(parsed, limit ?? 50, closed ?? false, cancellationToken)
                 .ConfigureAwait(false);
 
-            return Results.Ok(found.Select(View));
+            // Worked out now, from the automations and states the last scan took, rather than stored on the
+            // finding: an automation deleted or switched off since is never named, whichever cards the scan
+            // happened to refresh.
+            var known = scanner.Automations;
+            return Results.Ok(found.Select(anomaly => View(anomaly, CoveredBy(anomaly, known))));
         })
-        .WithSummary("Lists what the scanner noticed. Dismissed and resolved ones are left out unless asked for.");
+        .WithSummary("Lists what the scanner noticed, and for an open finding any automation that already fires on it. Dismissed and resolved ones are left out unless asked for.");
 
         api.MapGet("/anomalies/summary", async (IStore store, CancellationToken cancellationToken) =>
         {
@@ -697,7 +707,7 @@ public static class Endpoints
         return agreed;
     }
 
-    internal static AnomalyView View(Anomaly anomaly) => new(
+    internal static AnomalyView View(Anomaly anomaly, IReadOnlyList<CoveringAutomation>? coveredBy = null) => new(
         anomaly.Id,
         anomaly.EntityId,
         anomaly.Kind.ToString(),
@@ -709,7 +719,16 @@ public static class Endpoints
         anomaly.DetectedUtc,
         anomaly.DecidedUtc,
         anomaly.Severity,
-        anomaly.Dismissals);
+        anomaly.Dismissals,
+        coveredBy);
+
+    /// <summary>
+    /// The automations that already fire on an open finding. Null when there is no telling -- the scanner has
+    /// not read the automations, or could not -- which the card treats exactly like "none": it offers to draft
+    /// one, and says nothing either way about what already exists.
+    /// </summary>
+    internal static IReadOnlyList<CoveringAutomation>? CoveredBy(Anomaly anomaly, KnownAutomations? known) =>
+        anomaly.Status != AnomalyStatus.Open || known is null ? null : Coverage.Find(anomaly, known);
 
     private static JsonNode? Node(string? json)
     {

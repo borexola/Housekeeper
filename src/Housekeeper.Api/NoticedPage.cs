@@ -39,6 +39,9 @@ internal static class NoticedPage
   a.jump { color: var(--link); text-decoration: underline; }
   .gauge { color: var(--muted); font-size: 12.5px; margin-top: 6px; }
   .suggestion { margin-top: 10px; color: var(--ink-soft); font-size: 13.5px; }
+  .suggestion.covered strong { color: var(--ink); font-weight: 500; }
+  .suggestion.covered .how { color: var(--muted); }
+  .suggestion.another { margin-top: 4px; color: var(--muted); }
   h2.section { margin-top: 0; }
 
   .spin {
@@ -224,6 +227,9 @@ function gaugeText(a) {
   return times <= 1 ? 'Just over its usual' : 'About ' + times + '× its usual';
 }
 
+/** How many automations a covered card names before counting the rest. */
+const COVERED_SHOWN = 3;
+
 function anomalyCard(a, proposalsById) {
   const card = el('div', 'card finding kind-' + a.kind + (a.status === 'Open' ? '' : ' closed'));
   const evidence = a.evidence || {};
@@ -281,21 +287,41 @@ function anomalyCard(a, proposalsById) {
   if (a.proposalId) card.append(linkedNote(a, proposalsById.get(a.proposalId)));
 
   if (a.status === 'Open') {
-    card.append(el('div', 'suggestion', a.kind === 'MissingEntity'
-      ? 'Re-drafting uses the original request against what exists now: "' + a.suggestedRequest + '"'
-      : a.kind === 'Habit'
-        ? 'The automation: "' + (evidence.spoken || a.suggestedRequest) + '"'
-        : 'An automation would ' + suggestionText(a)));
+    // An automation of theirs already fires on this. Say so, and which trigger, before offering to build a
+    // second one: the finding is still true and worth reading; it is the offer that may be redundant. What
+    // another one would do stays on the card, so "Make another anyway" is never a button nobody can see
+    // the effect of -- and the two can be compared.
+    const covered = Array.isArray(a.coveredBy) ? a.coveredBy : [];
+
+    if (covered.length) {
+      const note = el('div', 'suggestion covered');
+      note.append(covered.length === 1 ? 'You already have an automation for this: ' : 'You already have automations for this: ');
+      const shown = covered.length > COVERED_SHOWN + 1 ? covered.slice(0, COVERED_SHOWN) : covered;
+      shown.forEach((one, i) => {
+        if (i) note.append(i === shown.length - 1 && shown.length === covered.length ? ' and ' : ', ');
+        note.append(el('strong', null, one.alias || one.entityId));
+        note.append(el('span', 'how', ' (' + one.why + ')'));
+      });
+      if (shown.length < covered.length) note.append(' and ' + (covered.length - shown.length) + ' more');
+      note.append('.');
+      card.append(note, el('div', 'suggestion another', 'Another would ' + suggestionText(a)));
+    } else {
+      card.append(el('div', 'suggestion', a.kind === 'MissingEntity'
+        ? 'Re-drafting uses the original request against what exists now: "' + a.suggestedRequest + '"'
+        : a.kind === 'Habit'
+          ? 'The automation: "' + (evidence.spoken || a.suggestedRequest) + '"'
+          : 'An automation would ' + suggestionText(a)));
+    }
 
     const status = el('div', 'status');
     const row = el('div', 'row actions');
     row.append(
-      action(a.kind === 'MissingEntity' ? 'Re-draft it' : 'Make an automation', async () => {
+      action(a.kind === 'MissingEntity' ? 'Re-draft it' : covered.length ? 'Make another anyway' : 'Make an automation', async () => {
         tell(status, 'Asking the model for a draft. This usually takes 10–60 seconds. Nothing is created in Home Assistant until you confirm the draft.');
         const proposal = await call('api/anomalies/' + a.id + '/automate', { method: 'POST', headers: headers(false) });
         toast('Draft ready. Opening it on the dashboard to review and confirm.');
         location.href = 'dashboard#proposal-' + proposal.id;
-      }, true, { busy: 'Drafting…', patience: 'Still going. A model running locally on a CPU can take a minute or more; it has not stalled.', status, reload: false }),
+      }, covered.length ? 'quiet' : true, { busy: 'Drafting…', patience: 'Still going. A model running locally on a CPU can take a minute or more; it has not stalled.', status, reload: false }),
       action(a.kind === 'Habit' ? 'Not this one' : 'Dismiss', async () => {
         const result = await call('api/anomalies/' + a.id + '/dismiss', { method: 'POST', headers: headers(false) });
         toast(result.note || (a.kind === 'Habit'

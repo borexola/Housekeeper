@@ -208,7 +208,8 @@ public class HabitsTests
     {
         var existing = new ExistingAutomation("1", "automation.pantry", "Pantry light on motion",
             new HashSet<string>(StringComparer.Ordinal) { Light.EntityId, Motion.EntityId },
-            new HashSet<string>(StringComparer.Ordinal) { "state" });
+            new HashSet<string>(StringComparer.Ordinal) { "state" },
+            []);
 
         var report = Find(PantryEvenings(), automations: [existing]);
 
@@ -368,7 +369,8 @@ public class HabitScanTests : StoreFixture
         // An hour later the house has an automation for exactly this. The offer is withdrawn and says why.
         _ha.Automations.Add(new ExistingAutomation("1", "automation.pantry", "Pantry",
             new HashSet<string>(StringComparer.Ordinal) { "light.pantry", "binary_sensor.pantry_motion" },
-            new HashSet<string>(StringComparer.Ordinal) { "state" }));
+            new HashSet<string>(StringComparer.Ordinal) { "state" },
+            []));
         Clock.Advance(TimeSpan.FromMinutes(61));
         await scanner.ScanAsync(CancellationToken.None);
 

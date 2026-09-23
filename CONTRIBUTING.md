@@ -73,6 +73,14 @@ See [docs/architecture.md](docs/architecture.md) for how the pieces fit.
 - Update `CHANGELOG.md` under *Unreleased*.
 - For anything touching the write path or the validator, call it out and reference [SECURITY.md](SECURITY.md).
 
+## Releasing
+
+- Rename *Unreleased* in `CHANGELOG.md` to `## [x.y.z] - date` before tagging `vx.y.z`: the
+  [release workflow](.github/workflows/release.yml) takes the release notes from that heading.
+- The add-on installs prebuilt images, so a fork has to publish its own before installing: push to GitHub
+  and tag a version, and the release workflow pushes the images [`housekeeper/config.yaml`](housekeeper/config.yaml)
+  points at.
+
 ## Code style
 
 Governed by `.editorconfig`. Run `dotnet format` before pushing. Prefer composition over inheritance

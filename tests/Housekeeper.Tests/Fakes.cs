@@ -24,10 +24,20 @@ public sealed class FakeHomeAssistant : IHomeAssistant
             ? Task.FromException<IReadOnlyList<HaEntity>>(EntitiesFailure)
             : Task.FromResult<IReadOnlyList<HaEntity>>(Entities);
 
-    public Task<IReadOnlyList<ExistingAutomation>> GetAutomationsAsync(IReadOnlyList<HaEntity> entities, CancellationToken cancellationToken) =>
-        AutomationsFailure is not null
-            ? Task.FromException<IReadOnlyList<ExistingAutomation>>(AutomationsFailure)
-            : Task.FromResult<IReadOnlyList<ExistingAutomation>>(Automations);
+    /// <summary>How many times the automations were asked for, so a test can see who reads them and how often.</summary>
+    public int AutomationReads { get; private set; }
+
+    /// <summary>Held open to keep a read of the automations in flight, the way a config endpoint that has stopped answering would.</summary>
+    public TaskCompletionSource? AutomationsGate { get; set; }
+
+    public async Task<IReadOnlyList<ExistingAutomation>> GetAutomationsAsync(IReadOnlyList<HaEntity> entities, CancellationToken cancellationToken)
+    {
+        AutomationReads++;
+        if (AutomationsGate is not null) await AutomationsGate.Task.WaitAsync(cancellationToken);
+        if (AutomationsFailure is not null) throw AutomationsFailure;
+
+        return [.. Automations];
+    }
 
     public Task<IReadOnlySet<string>> GetServicesAsync(CancellationToken cancellationToken) =>
         ServicesFailure is not null
@@ -190,10 +200,11 @@ public static class Build
         string? stateClass = null,
         string? entityCategory = null,
         bool hidden = false,
-        string? areaId = null)
+        string? areaId = null,
+        string? registryId = null)
     {
         var changed = lastChanged ?? DateTimeOffset.UnixEpoch;
-        return new HaEntity(entityId, state, changed, changed, friendlyName, deviceClass, unit, area, automationConfigId, deviceId, deviceName, stateClass, entityCategory, hidden, areaId);
+        return new HaEntity(entityId, state, changed, changed, friendlyName, deviceClass, unit, area, automationConfigId, deviceId, deviceName, stateClass, entityCategory, hidden, areaId, registryId);
     }
 
     public static AutomationDraft Draft(
@@ -210,7 +221,8 @@ public static class Build
         IEnumerable<string>? triggerKinds = null) =>
         new(id, $"automation.{id}", alias,
             new HashSet<string>(entities, StringComparer.Ordinal),
-            new HashSet<string>(triggerKinds ?? [], StringComparer.Ordinal));
+            new HashSet<string>(triggerKinds ?? [], StringComparer.Ordinal),
+            []);
 }
 
 /// <summary>

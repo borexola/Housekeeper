@@ -151,6 +151,11 @@ public class HomeAssistantClientTests
         Assert.Equal(1, handler.Count("GET /api/config/automation/config/"));
     }
 
+    /// <summary>
+    /// Kept against each automation's id and the moment its entity last changed, so one added, removed, switched
+    /// on or off, or edited is read at once -- and otherwise kept an hour, because a sweep is one request per
+    /// automation and Home Assistant re-parses its automations file for every one of them.
+    /// </summary>
     [Fact]
     public async Task Automation_configs_are_cached_by_the_set_of_ids_and_refetched_when_it_changes()
     {
@@ -168,12 +173,14 @@ public class HomeAssistantClientTests
         await client.GetAutomationsAsync([away, night], CancellationToken.None);
         Assert.Equal(3, handler.Count("GET /api/config/"));
 
-        // The same set, still fresh: nothing more is read.
+        // The same set, still fresh: nothing more is read -- not after the five minutes that used to age it out.
         await client.GetAutomationsAsync([night, away], CancellationToken.None);
+        clock.Advance(TimeSpan.FromMinutes(6));
+        await client.GetAutomationsAsync([away, night], CancellationToken.None);
         Assert.Equal(3, handler.Count("GET /api/config/"));
 
-        // Aged out: read again.
-        clock.Advance(TimeSpan.FromMinutes(6));
+        // Aged out after the hour: read again.
+        clock.Advance(TimeSpan.FromHours(1));
         await client.GetAutomationsAsync([away, night], CancellationToken.None);
         Assert.Equal(5, handler.Count("GET /api/config/"));
     }

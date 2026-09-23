@@ -405,6 +405,10 @@ public static class Concerns
                 ["concern"] = concern.Text,
                 ["concern_id"] = concern.Id,
                 ["rule"] = rule.Describe(LabelFor(rule, entity)),
+
+                // The rule's shape as a value rather than a sentence, so what would already answer it -- a
+                // line on the reading, or a state held too long -- can be read back without parsing English.
+                ["rule_kind"] = rule.Kind.ToString(),
             }),
         };
     }

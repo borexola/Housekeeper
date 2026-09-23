@@ -517,6 +517,62 @@ public class ApiTests
         }
     }
 
+    /// <summary>
+    /// The card reads what already fires on a finding from the list itself, worked out when the list is asked
+    /// for. Pinned here in the shape the page reads it: a finding closed, or one nothing fires on, says nothing.
+    /// </summary>
+    [Fact]
+    public async Task An_open_finding_says_which_automation_already_fires_on_it()
+    {
+        const string door = "binary_sensor.coverage_api_door";
+        const string alert = "automation.coverage_api_door_left_open";
+        var store = _app.Services.GetRequiredService<IStore>();
+        var since = DateTimeOffset.UtcNow.AddHours(-3);
+
+        _app.HomeAssistant.Entities.Add(Build.Entity(door, "on", since, "Coverage door", "door"));
+        _app.HomeAssistant.Entities.Add(Build.Entity(alert, "on", since, "Door left open", automationConfigId: "coverage-api"));
+        var automation = new ExistingAutomation("coverage-api", alert, "Door left open",
+            new HashSet<string>([door], StringComparer.Ordinal),
+            new HashSet<string>(["state"], StringComparer.Ordinal),
+            [new AutomationTrigger("state", [door], To: ["on"], For: TimeSpan.FromMinutes(10))]);
+        _app.HomeAssistant.Automations.Add(automation);
+
+        var open = await store.UpsertAnomalyAsync(new Anomaly
+        {
+            DedupKey = "test:coverage-api:open",
+            EntityId = door,
+            Kind = AnomalyKind.StuckState,
+            Summary = "Has been open for 3 hours.",
+            SuggestedRequest = $"Notify me when {door} stays 'on' for more than 30 minutes.",
+            EvidenceJson = """{"state":"on"}""",
+            Status = AnomalyStatus.Open,
+            DetectedUtc = DateTimeOffset.UtcNow,
+        }, CancellationToken.None);
+
+        try
+        {
+            await _client.PostAsync("/api/scan", null);
+
+            var listed = await _client.GetFromJsonAsync<JsonElement[]>("/api/anomalies?limit=200&closed=true");
+            var card = listed!.Single(a => a.GetProperty("id").GetInt64() == open.Id);
+            var covering = Assert.Single(card.GetProperty("coveredBy").EnumerateArray());
+
+            Assert.Equal("Door left open", covering.GetProperty("alias").GetString());
+            Assert.Equal(alert, covering.GetProperty("entityId").GetString());
+            Assert.Equal("fires when it stays open for 10 minutes", covering.GetProperty("why").GetString());
+            Assert.False(covering.GetProperty("conditional").GetBoolean());
+
+            // Nothing is said about a card that is not open.
+            Assert.All(listed!.Where(a => a.GetProperty("status").GetString() != "Open"),
+                a => Assert.Equal(JsonValueKind.Null, a.GetProperty("coveredBy").ValueKind));
+        }
+        finally
+        {
+            _app.HomeAssistant.Entities.RemoveAll(entity => entity.EntityId is door or alert);
+            _app.HomeAssistant.Automations.Remove(automation);
+        }
+    }
+
     [Fact]
     public async Task Scanning_then_promoting_a_finding_produces_a_draft()
     {

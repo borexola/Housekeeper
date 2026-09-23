@@ -72,10 +72,14 @@ Home Assistant leaves the box with its placeholder.
 
 Step 4 used to be the slowest part of a draft after the model: every existing automation's config was
 fetched on every draft, and the state list was fetched a second time to find their ids. Now the automation
-entities carry their config id, so the entity list the draft already holds is enough to know what to read,
-and the configs and the service list are each kept for five minutes. The automations cache is keyed on the
-set of ids, so one added or deleted in Home Assistant is noticed at once; only an edit waits for the entry
-to age out, and creating one here invalidates it outright.
+entities carry their config id, so the entity list the draft already holds is enough to know what to read.
+The service list is kept for five minutes. The automation configs are kept against each automation's id,
+the moment its entity last changed, and the Home Assistant address, for up to an hour: an automation added,
+removed, switched on or off, or edited -- Home Assistant reloads an edited automation, which is a new state
+for its entity -- changes the key and is read at once, and an unchanged house is not read again. That
+matters because a sweep is one request per automation and Home Assistant re-parses its whole automations
+file for every one. A sweep with gaps in it (a config that timed out) is used but not kept, and creating
+an automation here invalidates the cache outright.
 
 Between 4 and 5 the user can say "not quite". `RefineAsync` re-runs steps 1–4 with the previous draft
 and the objection in the prompt as labelled data, and the shortlist widened to whatever the feedback
@@ -168,6 +172,23 @@ share no device Home Assistant knows about. Both groupings prefer a card the use
 that crosses the bar a scan later joins the existing finding and its own row is closed as covered, rather
 than opening beside it for ever.
 
+A card also says when an automation the user already has fires on it
+([`Coverage`](../src/Housekeeper.Core/Coverage.cs)), before offering to draft another. The claim is narrow
+on purpose, because a user told they are covered dismisses the finding. `AutomationInspector` keeps each
+trigger on its own -- its kind, the entity ids it names, `to`, `not_to`, `for`, `above`, `below`,
+`attribute`, whether it is enabled -- and a trigger counts only when it is switched on, in an automation
+whose entity is `on`, names the finding's entity itself (a device trigger names it by the registry id, which
+the entity registry resolves), and would fire on what was found: a line the reading is already past on that
+side, the held state with a `for:` that has run out, a `to:` naming the state the entity went quiet in, or
+the shape a concern's own rule asks for. Nothing is widened through devices or areas, templates and
+blueprints claim nothing, conditions make it a weaker claim, and a card standing for several entities is
+covered only when all of them are. It is worked out when `GET /api/anomalies` is asked, from the
+automations and entity states the last scan published, so it never names an automation switched off or
+deleted since. The scan reads the automations only while an open finding could use them, once per scan at
+most (shared with the routine search), backs off an hour after a failure, gives the sweep a minute in all,
+keeps the last good read through a Home Assistant restart, and keeps an automation that could not be read
+this time at its last reading while its entity has not changed.
+
 Severity is the same scale for every kind — 1 at the bar, one more for every doubling past it, capped at
 8 — and a missing-entity finding sits above the cap. A plain ratio grew without limit, and two of the three
 bars are durations that grow on their own: a sensor dead for a month scored sixty times over and buried a
@@ -239,7 +260,9 @@ automation with a state trigger, or whose effect appears in one with a time or s
 back as already automated rather than offered, and an open or promoted offer closes with that reason the
 hour after the user builds it. An automation's reach includes the entities in the areas and on the devices
 it targets and the entity ids inside its blueprint inputs (`AutomationInspector`), since editor-built
-automations rarely name entities directly. A scan on which Home Assistant lists no automations at all, on a
+automations rarely name entities directly. That is a far looser test than the one a finding's card uses to
+say an automation already fires on it, and on purpose: here a mistake costs an offer the user might have
+wanted, where on a finding it would cost the warning. A scan on which Home Assistant lists no automations at all, on a
 house that had them, is a restart in progress rather than a house that deleted them, and the search waits.
 
 A routine is raised as a finding of kind `Habit` — same triage, same one-click draft through the normal

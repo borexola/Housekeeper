@@ -7,7 +7,11 @@ namespace Housekeeper.Api;
 /// <summary>What the entity registry knows about one entity that its state does not say.</summary>
 /// <param name="EntityCategory"><c>config</c>, <c>diagnostic</c>, or null for an ordinary entity.</param>
 /// <param name="Hidden">The user has hidden it, which is as close to "do not tell me about this" as exists.</param>
-public sealed record RegistryEntity(string EntityId, string? EntityCategory, bool Hidden);
+/// <param name="Id">
+/// The registry's own id for the entity, which a device trigger built in the editor names it by in place of
+/// its entity id.
+/// </param>
+public sealed record RegistryEntity(string EntityId, string? EntityCategory, bool Hidden, string? Id = null);
 
 /// <summary>
 /// Reads Home Assistant's entity registry, which is the only place two useful facts live.
@@ -16,7 +20,8 @@ public sealed record RegistryEntity(string EntityId, string? EntityCategory, boo
 /// configure it — a plug's "Auto-off enabled" switch, a sensor's link quality — and hiding an entity is the
 /// user saying outright that they do not want to hear about it. Neither is in <c>/api/states</c>, which is
 /// why Housekeeper was reduced to guessing from entity ids, and why it reported a fridge plug's unticked
-/// checkbox as though the fridge were misbehaving.
+/// checkbox as though the fridge were misbehaving. The registry also holds each entity's own registry id,
+/// which is how a device trigger built in the editor names the one entity it fires on.
 ///
 /// The registry is only served over the WebSocket API, so this is the one part of Housekeeper that speaks
 /// it. Deliberately a single request-and-close rather than a subscription: the registry changes when someone
@@ -59,7 +64,7 @@ public static class EntityRegistry
             var hidden = item.TryGetProperty("hidden_by", out var hiddenBy) &&
                          hiddenBy.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
 
-            registry[entityId] = new RegistryEntity(entityId, Text(item, "entity_category"), hidden);
+            registry[entityId] = new RegistryEntity(entityId, Text(item, "entity_category"), hidden, Text(item, "id"));
         }
 
         return registry;
